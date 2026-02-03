@@ -7,12 +7,22 @@
  * Flow:
  * 1. LLM requests a tool call
  * 2. Wombat validates against skill manifest (fast, local check)
- * 3. Wombat proxies the call to backend
- * 4. Backend validates tenant permissions and executes
- * 5. Wombat receives result and feeds back to LLM
+ * 3. Wombat validates tool arguments (path safety, injection prevention)
+ * 4. Wombat proxies the call to backend
+ * 5. Backend validates tenant permissions and executes
+ * 6. Wombat receives result and feeds back to LLM
+ * 
+ * Security enhancements inspired by OpenClaw 2026.2.1:
+ * - Path traversal prevention (defense in depth)
+ * - Request timeouts to prevent hangs
+ * - UTC timestamps on timeout events
+ * 
+ * @see OpenClaw PR: "security(message-tool): validate filePath/path against sandbox root"
+ * @see OpenClaw PR: "fix(security): restrict local path extraction in media parser to prevent LFI"
  */
 
 import { z } from 'zod';
+import { isPathSafe, sanitizePath, nowUTC, detectInjectionPatterns } from '../security/index.js';
 
 // ============================================================================
 // Types
@@ -117,13 +127,81 @@ export const ToolResultSchema = z.object({
 // Tool Proxy Class
 // ============================================================================
 
+/** Path-like argument names that should be validated */
+const PATH_ARGUMENT_NAMES = ['path', 'filePath', 'file_path', 'filepath', 'directory', 'dir', 'folder'];
+
+/** Known safe sandbox roots for path validation */
+const SANDBOX_ROOTS = ['/tmp', '/var/tmp', process.cwd()];
+
 export class ToolProxy {
   private backendUrl: string;
   private timeout: number;
+  private enablePathValidation: boolean;
+  private sandboxRoots: string[];
 
-  constructor(options: { backendUrl: string; timeout?: number }) {
+  constructor(options: { 
+    backendUrl: string; 
+    timeout?: number;
+    /** Enable path validation for defense in depth (default: true) */
+    enablePathValidation?: boolean;
+    /** Allowed sandbox roots for path validation */
+    sandboxRoots?: string[];
+  }) {
     this.backendUrl = options.backendUrl.replace(/\/$/, ''); // Remove trailing slash
     this.timeout = options.timeout || 30000; // 30 second default
+    this.enablePathValidation = options.enablePathValidation ?? true;
+    this.sandboxRoots = options.sandboxRoots || SANDBOX_ROOTS;
+  }
+
+  /**
+   * Validate tool arguments for security issues.
+   * This is defense-in-depth - the backend also validates, but we catch obvious issues early.
+   * 
+   * @see OpenClaw PR: "security(message-tool): validate filePath/path against sandbox root"
+   */
+  private validateArguments(
+    toolName: string, 
+    args: Record<string, unknown>
+  ): { valid: boolean; error?: string; warnings: string[] } {
+    const warnings: string[] = [];
+
+    // Check for path-like arguments
+    for (const [key, value] of Object.entries(args)) {
+      if (typeof value !== 'string') continue;
+
+      // Check if this looks like a path argument
+      const isPathArg = PATH_ARGUMENT_NAMES.some(name => 
+        key.toLowerCase().includes(name.toLowerCase())
+      );
+
+      if (isPathArg && this.enablePathValidation) {
+        // Check for path traversal
+        const sanitized = sanitizePath(value);
+        if (sanitized === null) {
+          return {
+            valid: false,
+            error: `Invalid path in argument '${key}': path contains dangerous components`,
+            warnings
+          };
+        }
+
+        // Check if path is within sandbox (if it's absolute)
+        if (value.startsWith('/') || value.match(/^[A-Z]:\\/i)) {
+          const isSafe = this.sandboxRoots.some(root => isPathSafe(value, root));
+          if (!isSafe) {
+            warnings.push(`Path argument '${key}' may be outside sandbox`);
+          }
+        }
+      }
+
+      // Check for potential prompt injection in string arguments
+      const injectionPatterns = detectInjectionPatterns(value);
+      if (injectionPatterns.length > 0) {
+        warnings.push(`Potential injection patterns in '${key}': ${injectionPatterns.join(', ')}`);
+      }
+    }
+
+    return { valid: true, warnings };
   }
 
   /**
@@ -183,10 +261,31 @@ export class ToolProxy {
   }
 
   /**
-   * Proxy a tool call to the backend
+   * Proxy a tool call to the backend.
+   * 
+   * Security features:
+   * - Validates arguments for path traversal and injection patterns
+   * - Request timeout to prevent indefinite hangs
+   * - UTC timestamps on timeout errors for debugging
    */
   async execute(call: ToolCall, context: ToolContext): Promise<ToolResult> {
     const start = Date.now();
+
+    // Validate arguments before sending to backend (defense in depth)
+    const validation = this.validateArguments(call.name, call.arguments);
+    if (!validation.valid) {
+      return {
+        toolCallId: call.id,
+        success: false,
+        error: `Security validation failed: ${validation.error}`,
+        durationMs: Date.now() - start,
+      };
+    }
+
+    // Log warnings but don't block (backend is the authoritative validator)
+    if (validation.warnings.length > 0 && process.env.WOMBAT_TEST_MODE !== 'true') {
+      console.warn(`Tool '${call.name}' security warnings:`, validation.warnings);
+    }
 
     try {
       const controller = new AbortController();
@@ -241,7 +340,7 @@ export class ToolProxy {
         return {
           toolCallId: call.id,
           success: false,
-          error: `Tool call timed out after ${this.timeout}ms`,
+          error: `Tool call timed out after ${this.timeout}ms ${nowUTC()}`,
           durationMs,
         };
       }

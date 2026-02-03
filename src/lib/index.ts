@@ -12,6 +12,7 @@
  * - workspace: Workspace management
  * - evals: Evaluation framework
  * - integrations: External integrations
+ * - security: Security utilities (TLS, path validation, prompt injection prevention)
  */
 
 // Re-export modules - use named imports to avoid conflicts
@@ -25,3 +26,16 @@ export { llmComplete, llmStream, llmTask, llmCompact, ProviderContractError, par
 export * from './workspace/index.js';
 export * from './evals/index.js';
 export { listTasks, createTask, postMessage, postDocument, fireWebhook, getUsageTracker } from './integrations/index.js';
+
+// Security utilities (inspired by OpenClaw 2026.2.1)
+export {
+  enforceTLS13Minimum,
+  isPathSafe,
+  sanitizePath,
+  sanitizeForPrompt,
+  detectInjectionPatterns,
+  isUrlSafe,
+  formatUTCTimestamp,
+  nowUTC,
+  security
+} from './security/index.js';

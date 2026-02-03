@@ -49,6 +49,36 @@ Inspired by [OpenClaw](https://openclaw.ai/)'s workspace pattern, Wombat adapts 
 
 ---
 
+## How Wombat Works With Your Backend
+
+Wombat has a **bidirectional relationship** with your SaaS backend:
+
+```
+┌─────────────┐                              ┌─────────────┐
+│   Your      │ ────── (1) send message ───▶ │   Wombat    │ ──▶ OpenAI
+│   Backend   │                              │   Daemon    │
+│             │ ◀── (2) agent calls APIs ─── │             │
+└─────────────┘                              └─────────────┘
+     │                                              │
+     │  Source of truth:                            │  Stateless:
+     │  • Users, auth                               │  • Loads workspace config
+     │  • Tasks, messages                           │  • Builds prompts
+     │  • Conversations                             │  • Routes LLM calls
+     │  • Documents                                 │  • Mints agent JWTs
+     └──────────────────────────────────────────────┘
+```
+
+1. **Your backend sends messages** to Wombat (`POST /api/agents/send`)
+2. **Wombat calls an LLM** with workspace-configured prompts (personas, rules, skills)
+3. **The agent response may call your APIs** to create tasks, post messages, etc.
+4. **Your backend remains the source of truth** — Wombat is stateless
+
+This means you can run multiple Wombat instances behind a load balancer with no sticky sessions.
+
+See [INTEGRATION.md](docs/INTEGRATION.md) for the full integration guide.
+
+---
+
 ## Core Pillars
 
 | Pillar | Description |

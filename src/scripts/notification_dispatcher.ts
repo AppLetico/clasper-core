@@ -1,11 +1,11 @@
 import { config, requireEnv } from "../lib/core/config.js";
 
 const AGENT_DAEMON_URL = process.env.AGENT_DAEMON_URL || "http://localhost:8081";
-const internalToken = process.env.INTERNAL_TOKEN || "";
+const internalToken = process.env.INTERNAL_API_TOKEN || "";
 const daemonKey = config.daemonKey;
 
 requireEnv("BACKEND_URL", config.backendUrl);
-requireEnv("INTERNAL_TOKEN", internalToken);
+requireEnv("INTERNAL_API_TOKEN", internalToken);
 
 const limitUsers = Number(process.env.DISPATCH_LIMIT_USERS || 25);
 const limitNotifications = Number(process.env.DISPATCH_LIMIT_NOTIFICATIONS || 25);

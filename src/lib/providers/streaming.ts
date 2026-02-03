@@ -1,6 +1,10 @@
 /**
  * Streaming support for agent responses.
  * Provides Server-Sent Events (SSE) streaming for real-time output.
+ * 
+ * Security enhancements inspired by OpenClaw 2026.2.1:
+ * - Maximum streaming duration timeout
+ * - Graceful AbortError handling
  */
 
 import { config } from "../core/config.js";
@@ -8,7 +12,16 @@ import { type TokenUsage, type ConversationMessage } from "./openaiClient.js";
 import { getWorkspaceLoader, type PromptMode } from "../workspace/workspace.js";
 import { getUsageTracker, type CostBreakdown } from "../integrations/costs.js";
 import { llmStream, type WombatStreamEvent } from "./llmProvider.js";
+import { nowUTC } from "../security/index.js";
 import type { FastifyReply } from "fastify";
+
+/**
+ * Maximum duration for a streaming response (in milliseconds).
+ * Prevents indefinite hangs and resource exhaustion.
+ * 
+ * @see OpenClaw PR: "fix (#4954): add timeout to GatewayClient.request"
+ */
+const MAX_STREAMING_DURATION_MS = 120_000; // 2 minutes
 
 /**
  * Streaming event types.
@@ -36,6 +49,11 @@ export function formatSSE(event: StreamEvent): string {
 /**
  * Generate a streaming agent reply.
  * Streams chunks via SSE to the reply object.
+ * 
+ * Security features:
+ * - Maximum duration timeout (prevents indefinite hangs)
+ * - Graceful AbortError handling during shutdown
+ * - UTC timestamps on timeout events for debugging
  */
 export async function streamAgentReply(
   reply: FastifyReply,
@@ -46,9 +64,19 @@ export async function streamAgentReply(
     metadata?: Record<string, unknown> | null;
     promptMode?: PromptMode;
     timezone?: string;
+    /** Maximum streaming duration in ms (default: 120000) */
+    maxDurationMs?: number;
   }
 ): Promise<void> {
-  const { role, userMessage, messages = [], metadata, promptMode = "full", timezone } = params;
+  const { 
+    role, 
+    userMessage, 
+    messages = [], 
+    metadata, 
+    promptMode = "full", 
+    timezone,
+    maxDurationMs = MAX_STREAMING_DURATION_MS
+  } = params;
 
   // Set SSE headers
   reply.raw.writeHead(200, {
@@ -56,6 +84,20 @@ export async function streamAgentReply(
     "Cache-Control": "no-cache",
     Connection: "keep-alive"
   });
+
+  // Track whether we've already ended the stream
+  let streamEnded = false;
+  
+  // Set up maximum duration timeout to prevent indefinite hangs
+  // @see OpenClaw PR: "fix (#4954): add timeout to GatewayClient.request"
+  const timeoutId = setTimeout(() => {
+    if (!streamEnded) {
+      streamEnded = true;
+      const timeoutError = `Stream timeout after ${maxDurationMs}ms ${nowUTC()}`;
+      reply.raw.write(formatSSE({ type: "error", error: timeoutError }));
+      reply.raw.end();
+    }
+  }, maxDurationMs);
 
   try {
     // Build system prompt
@@ -101,6 +143,11 @@ export async function streamAgentReply(
 
     // Process streaming events
     for await (const event of streamGenerator) {
+      // Check if stream was ended by timeout
+      if (streamEnded) {
+        break;
+      }
+      
       switch (event.type) {
         case "start":
           reply.raw.write(formatSSE({ type: "start" }));
@@ -120,9 +167,27 @@ export async function streamAgentReply(
       }
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Streaming failed";
-    reply.raw.write(formatSSE({ type: "error", error: message }));
+    // Graceful AbortError handling during shutdown
+    // @see OpenClaw PR: "fix(gateway): suppress AbortError during shutdown"
+    if (error instanceof Error && error.name === 'AbortError') {
+      // Silently handle abort - this is expected during shutdown
+      if (!streamEnded) {
+        reply.raw.write(formatSSE({ type: "error", error: `Stream aborted ${nowUTC()}` }));
+      }
+    } else {
+      const message = error instanceof Error ? error.message : "Streaming failed";
+      if (!streamEnded) {
+        reply.raw.write(formatSSE({ type: "error", error: message }));
+      }
+    }
+  } finally {
+    // Clear the timeout
+    clearTimeout(timeoutId);
+    
+    // End the stream if not already ended
+    if (!streamEnded) {
+      streamEnded = true;
+      reply.raw.end();
+    }
   }
-
-  reply.raw.end();
 }

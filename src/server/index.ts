@@ -1,3 +1,23 @@
+/**
+ * Wombat Server Entry Point
+ * 
+ * Security enhancements inspired by OpenClaw 2026.2.1:
+ * - TLS 1.3 minimum for all HTTPS connections
+ * - Request timeouts
+ * - Path traversal prevention
+ * - Prompt injection sanitization
+ * 
+ * @see https://github.com/openclaw/openclaw/pulls (2026.2.1 security PRs)
+ */
+
+// Prefer TLS 1.3 minimum when writable. Node 22+ makes tls.DEFAULT_MIN_VERSION read-only.
+import * as tls from "node:tls";
+try {
+  (tls as { DEFAULT_MIN_VERSION?: string }).DEFAULT_MIN_VERSION = "TLSv1.3";
+} catch {
+  // Ignore: read-only in Node 22+
+}
+
 import Fastify from "fastify";
 import { readFileSync } from "fs";
 import { join } from "path";

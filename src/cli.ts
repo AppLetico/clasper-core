@@ -1,9 +1,19 @@
 #!/usr/bin/env node
+/**
+ * Wombat CLI
+ * 
+ * Security: Enforces TLS 1.3 minimum for all HTTPS connections.
+ * @see OpenClaw PR: "require TLS 1.3 as minimum"
+ */
 import { Command } from "commander";
 import { spawn } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// Enforce TLS 1.3 minimum before any network operations
+import * as tls from "node:tls";
+(tls as { DEFAULT_MIN_VERSION: string }).DEFAULT_MIN_VERSION = "TLSv1.3";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const packageRoot = join(__dirname, "..");

@@ -1,7 +1,7 @@
 # Wombat - common targets for dev and CI
 # Use: make setup (first time), make dev, make workspace, make test, etc.
 
-.PHONY: install dev build test setup workspace clean conformance
+.PHONY: install dev build test setup workspace clean conformance dispatcher
 
 install:
 	npm install
@@ -15,6 +15,9 @@ setup: install
 
 dev:
 	npm run dev
+
+dispatcher:
+	npm run dispatcher
 
 build:
 	npm run build
