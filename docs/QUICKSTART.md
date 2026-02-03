@@ -3,8 +3,32 @@
 ## Prerequisites
 
 - Node.js 18+
-- A Mission Control-compatible backend (e.g., zenvy-backend)
 - OpenAI API key
+- A **Mission Control-compatible backend** (see below)
+
+### What is a Mission Control backend?
+
+Wombat is stateless — it needs a backend to store tasks, messages, and documents. Your backend must implement the [Control Plane Contract](CONTROL_PLANE_CONTRACT.md):
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/mission-control/capabilities` | Feature discovery |
+| `GET /api/mission-control/tasks` | List tasks |
+| `POST /api/mission-control/tasks` | Create tasks |
+| `POST /api/mission-control/messages` | Post messages |
+| `POST /api/mission-control/documents` | Create documents |
+
+**Options:**
+
+1. **Use the reference implementation** (for testing):
+   ```bash
+   export AGENT_JWT_SECRET=your-secret
+   npx tsx examples/mission-control-lite/server.ts
+   ```
+
+2. **Integrate with an existing backend** (like zenvy-backend) — see [INTEGRATION.md](INTEGRATION.md)
+
+3. **Build your own** — see [CONTROL_PLANE_QUICKSTART.md](CONTROL_PLANE_QUICKSTART.md)
 
 ## Local development
 
