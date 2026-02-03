@@ -37,7 +37,7 @@ This starts a backend at `http://localhost:9001` with all required endpoints.
 
 ### Option B: Use an Existing Backend
 
-If you have a Mission Control-compatible backend (like zenvy-backend), configure Wombat to point to it:
+If you have a Mission Control-compatible backend, configure Wombat to point to it:
 
 ```bash
 # In .env

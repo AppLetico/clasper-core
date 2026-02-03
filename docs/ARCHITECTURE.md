@@ -912,7 +912,7 @@ Include these rules in your AGENTS.md (see [WORKSPACE.md](WORKSPACE.md#agentsmd-
 ## Examples
 
 See `docs/examples/` for example workspace configurations:
-- `docs/examples/zenvy/` - Zenvy School Finder multi-agent setup
+- `docs/examples/multi-agent/` - Multi-agent workspace with specialized roles
 
 ---
 

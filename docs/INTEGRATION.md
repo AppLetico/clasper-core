@@ -68,8 +68,8 @@ This is the key concept to understand: **Wombat and your backend have a bidirect
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                                                                          │
 │   ┌─────────────┐                              ┌─────────────┐          │
-│   │   Backend   │ ────── (1) sends message ──▶ │   Wombat    │          │
-│   │   (Zenvy)   │                              │   Daemon    │          │
+│   │    Your     │ ────── (1) sends message ──▶ │   Wombat    │          │
+│   │   Backend   │                              │   Daemon    │          │
 │   │             │ ◀─ (2) agent calls APIs ──── │             │          │
 │   │             │                              │             │          │
 │   │  • Database │                              │  • Stateless│          │
@@ -157,25 +157,23 @@ WOMBAT_DEFAULT_TASK=Agent Thread
 
 For production projects, keep the workspace config **in your backend repo** (not in wombat). This keeps agent behavior version-controlled with the APIs the agents call.
 
-**Example: Zenvy**
+**Example directory structure:**
 
 ```
-zenvy-backend/
+your-backend/
 ├── app/                        # Backend code
-├── agent-daemon/               # Wombat workspace config
+├── agent-config/               # Wombat workspace config
 │   ├── workspace/              # ← Set WOMBAT_WORKSPACE to this
 │   │   ├── AGENTS.md           # Operating rules
 │   │   ├── IDENTITY.md         # Agent names/branding
 │   │   ├── HEARTBEAT.md        # Heartbeat checklist
 │   │   ├── souls/              # Per-agent personalities
-│   │   │   ├── jarvis.md
-│   │   │   ├── scout.md
-│   │   │   └── analyst.md
+│   │   │   ├── lead.md
+│   │   │   ├── researcher.md
+│   │   │   └── writer.md
 │   │   └── skills/             # API usage instructions
-│   │       ├── school-search/SKILL.md
-│   │       └── mission-control/SKILL.md
-│   └── config/
-│       └── agent-config.json   # Agent roles, session keys
+│   │       └── task-management/SKILL.md
+│   └── README.md
 └── ...
 ```
 
@@ -183,10 +181,10 @@ zenvy-backend/
 
 ```bash
 # From wombat directory
-WOMBAT_WORKSPACE=/path/to/zenvy-backend/agent-daemon/workspace make dev
+WOMBAT_WORKSPACE=/path/to/your-backend/agent-config/workspace make dev
 ```
 
-See [docs/examples/zenvy/](examples/zenvy/) for a complete example workspace.
+See [docs/examples/multi-agent/](examples/multi-agent/) for a complete example workspace.
 
 See [WORKSPACE.md](WORKSPACE.md) for workspace file specifications.
 
