@@ -1,69 +1,104 @@
 # Quickstart
 
+This guide covers everything you need to run Wombat end-to-end.
+
 ## Prerequisites
 
 - Node.js 18+
-- OpenAI API key
-- A **Mission Control-compatible backend** (see below)
+- OpenAI API key (or other LLM provider)
 
-### What is a Mission Control backend?
+---
 
-Wombat is stateless — it needs a backend to store tasks, messages, and documents. Your backend must implement the [Control Plane Contract](CONTROL_PLANE_CONTRACT.md):
-
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /api/mission-control/capabilities` | Feature discovery |
-| `GET /api/mission-control/tasks` | List tasks |
-| `POST /api/mission-control/tasks` | Create tasks |
-| `POST /api/mission-control/messages` | Post messages |
-| `POST /api/mission-control/documents` | Create documents |
-
-**Options:**
-
-1. **Use the reference implementation** (for testing):
-   ```bash
-   export AGENT_JWT_SECRET=your-secret
-   npx tsx examples/mission-control-lite/server.ts
-   ```
-
-2. **Integrate with an existing backend** (like zenvy-backend) — see [INTEGRATION.md](INTEGRATION.md)
-
-3. **Build your own** — see [CONTROL_PLANE_QUICKSTART.md](CONTROL_PLANE_QUICKSTART.md)
-
-## Local development
-
-### 1. Install dependencies
+## Step 1: Install Wombat
 
 ```bash
+git clone <repo-url>
+cd wombat
 npm install
 cp .env.example .env
 ```
 
-### 2. Create a workspace
+---
 
-Create a workspace folder with your agent configuration:
+## Step 2: Set Up a Backend
+
+Wombat is **stateless** — it needs a backend to store tasks, messages, and documents. Choose one option:
+
+### Option A: Reference Implementation (for testing)
+
+Run the in-memory reference backend:
 
 ```bash
-mkdir -p workspace/souls
+export AGENT_JWT_SECRET=dev-secret-change-me
+npx tsx examples/mission-control-lite/server.ts
 ```
 
-Add at minimum an `AGENTS.md` with operating rules:
+This starts a backend at `http://localhost:9001` with all required endpoints.
+
+### Option B: Use an Existing Backend
+
+If you have a Mission Control-compatible backend (like zenvy-backend), configure Wombat to point to it:
+
+```bash
+# In .env
+BACKEND_URL=http://localhost:8000
+AGENT_JWT_SECRET=<same-secret-as-backend>
+```
+
+See [INTEGRATION.md](INTEGRATION.md) for detailed integration patterns.
+
+### Option C: Build Your Own Backend
+
+Your backend must implement these endpoints:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/mission-control/capabilities` | GET | Feature discovery |
+| `/api/mission-control/tasks` | GET | List tasks for user |
+| `/api/mission-control/tasks` | POST | Create a task |
+| `/api/mission-control/messages` | POST | Post a message |
+| `/api/mission-control/documents` | POST | Create a document |
+
+**Requirements:**
+
+1. **Shared secret** — Wombat and your backend must share the same `AGENT_JWT_SECRET`
+2. **Agent token auth** — Accept `X-Agent-Token` header with JWT containing `type`, `user_id`, `agent_role`
+3. **Tenant isolation** — Scope all reads/writes by `user_id` from the token
+4. **Idempotency** — Create endpoints must accept `idempotency_key`
+
+**Validate your implementation:**
+
+```bash
+export CONTROL_PLANE_URL=http://localhost:8000
+export AGENT_TOKEN=<your-agent-jwt>
+npm run conformance
+```
+
+See [CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md) for the full specification.
+
+---
+
+## Step 3: Create a Workspace
+
+The workspace defines your agent's personality and behavior:
+
+```bash
+mkdir -p workspace/souls workspace/skills
+```
+
+**Required: `workspace/AGENTS.md`** — Operating rules:
 
 ```markdown
-# workspace/AGENTS.md
-
-## Operating Rules
+# Operating Rules
 
 - Be helpful and accurate
 - Keep responses concise
 - Ask for clarification when needed
 ```
 
-And a `SOUL.md` (or `souls/<role>.md` for multi-agent):
+**Required: `workspace/SOUL.md`** — Agent persona (or `souls/<role>.md` for multi-agent):
 
 ```markdown
-# workspace/SOUL.md
-
 # Agent Persona
 
 You are a helpful assistant.
@@ -73,86 +108,124 @@ You are a helpful assistant.
 - Evidence-based answers
 ```
 
+**Optional files:**
+- `IDENTITY.md` — Branding (name, tagline)
+- `HEARTBEAT.md` — Checklist for autonomous health checks
+- `skills/<name>/SKILL.md` — Skill definitions for tool use
+
 See [WORKSPACE.md](WORKSPACE.md) for the full specification.
 
-### 3. Configure environment
+---
 
-Edit `.env` with your settings:
+## Step 4: Configure Environment
+
+Edit `.env`:
 
 ```bash
-# Required
-BACKEND_URL=http://localhost:8000
-AGENT_JWT_SECRET=your-secret-matching-backend
+# Backend connection
+BACKEND_URL=http://localhost:9001   # or your backend URL
+AGENT_JWT_SECRET=dev-secret-change-me
+
+# LLM provider
 OPENAI_API_KEY=sk-...
 
 # Workspace path (default: ./workspace)
 WOMBAT_WORKSPACE=./workspace
 
-# Default task title (optional - for auto-creation)
+# Optional: auto-create task with this title
 WOMBAT_DEFAULT_TASK=My Agent Thread
 ```
 
-### 4. Start the daemon
+---
+
+## Step 5: Start the Daemon
 
 ```bash
 npm run dev
 ```
 
-Default daemon URL: `http://localhost:8081`
+Wombat starts at `http://localhost:8081`.
+
+**Verify it's running:**
+
+```bash
+curl http://localhost:8081/health
+# {"status":"ok"}
+```
+
+---
+
+## Step 6: Send Your First Message
+
+```bash
+curl -X POST http://localhost:8081/api/agents/send \
+  -H "Content-Type: application/json" \
+  -H "X-Daemon-Key: <your-daemon-key>" \
+  -d '{
+    "user_id": "user-123",
+    "agent_role": "default",
+    "message": "Hello, what can you help me with?"
+  }'
+```
+
+---
+
+## Common Commands
+
+```bash
+# Development server
+npm run dev
+
+# Production build
+npm run build && npm start
+
+# Run dispatcher (delivers notifications from backend to daemon)
+npm run dispatcher
+
+# Run heartbeat check
+USER_ID=user-123 AGENT_ROLE=default npm run heartbeat
+
+# Run conformance tests against your backend
+npm run conformance
+
+# Run unit tests
+npm test
+```
+
+---
 
 ## Docker
 
 ```bash
 cp .env.example .env
+# Edit .env with your settings
 docker compose up --build
 ```
 
-## Common commands
-
-```bash
-# Build for production
-npm run build
-
-# Run tests
-npm test
-
-# Run dispatcher (deliver notifications to daemon)
-npm run dispatcher
-
-# Run heartbeat (set USER_ID and AGENT_ROLE)
-USER_ID=... AGENT_ROLE=agent npm run heartbeat
-
-# Run daily standup
-STANDUP_TIMEZONE=UTC npm run standup
-```
-
-## Verify it's working
-
-```bash
-curl -X POST http://localhost:8081/health
-# {"status":"ok"}
-```
+---
 
 ## Ops Console (Optional)
 
-The Operations Console is served at `/ops` and is protected by OIDC + RBAC.
-
-To enable it, configure these environment variables:
+The Operations Console at `/ops` provides trace viewing, replay, and governance controls. It requires OIDC authentication:
 
 ```bash
-OPS_OIDC_ISSUER=
-OPS_OIDC_AUDIENCE=
-OPS_OIDC_JWKS_URL=
+OPS_OIDC_ISSUER=https://your-idp.com
+OPS_OIDC_AUDIENCE=wombat-ops
+OPS_OIDC_JWKS_URL=https://your-idp.com/.well-known/jwks.json
 OPS_RBAC_CLAIM=roles
-OPS_TENANT_CLAIM=tenant_id
 ```
 
-See [GOVERNANCE.md](GOVERNANCE.md) for RBAC configuration details.
+See [GOVERNANCE.md](GOVERNANCE.md) for RBAC configuration.
 
-## Next steps
+---
 
-- [WORKSPACE.md](WORKSPACE.md) - Configure your agent personas
-- [API.md](API.md) - API reference
-- [GOVERNANCE.md](GOVERNANCE.md) - RBAC, budgets, and audit
-- [OPERATIONS.md](OPERATIONS.md) - Tracing, replay, and skill lifecycle
-- [INTEGRATION.md](INTEGRATION.md) - Backend integration guide
+## Next Steps
+
+| Document | Description |
+|----------|-------------|
+| [INTEGRATION.md](INTEGRATION.md) | Backend ↔ Wombat integration patterns |
+| [WORKSPACE.md](WORKSPACE.md) | Full workspace specification |
+| [API.md](API.md) | API reference |
+| [CONTROL_PLANE_CONTRACT.md](CONTROL_PLANE_CONTRACT.md) | Backend contract specification |
+| [OPERATIONS.md](OPERATIONS.md) | Tracing, replay, and skill lifecycle |
+| [GOVERNANCE.md](GOVERNANCE.md) | RBAC, budgets, and audit |

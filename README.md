@@ -487,10 +487,9 @@ A **Makefile** is provided for common tasks: `make setup`, `make dev`, `make tes
 
 | Document | Description |
 |----------|-------------|
-| [docs/QUICKSTART.md](docs/QUICKSTART.md) | Getting started guide |
-| [docs/INTEGRATION.md](docs/INTEGRATION.md) | **Backend ↔ Wombat integration guide** |
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | **Complete getting started guide** |
+| [docs/INTEGRATION.md](docs/INTEGRATION.md) | Backend ↔ Wombat integration patterns |
 | [docs/CONTROL_PLANE_CONTRACT.md](docs/CONTROL_PLANE_CONTRACT.md) | Backend API contract specification |
-| [docs/CONTROL_PLANE_QUICKSTART.md](docs/CONTROL_PLANE_QUICKSTART.md) | Implement a backend in 5 steps |
 | [docs/WORKSPACE.md](docs/WORKSPACE.md) | Workspace specification (SOUL, AGENTS, skills) |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and design |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Tracing, evals, versioning, ops console |
