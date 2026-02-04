@@ -13,6 +13,21 @@ vi.mock("../lib/integrations/missionControl.js", () => ({
 
 let buildApp: () => any;
 
+async function buildAppWithEnv(overrides: Record<string, string>) {
+  vi.resetModules();
+  process.env = {
+    ...process.env,
+    CLASPER_TEST_MODE: "true",
+    AGENT_JWT_SECRET: "test-secret",
+    AGENT_DAEMON_API_KEY: "",
+    BACKEND_URL: "http://localhost:8000",
+    CLASPER_WORKSPACE: "./test-workspace",
+    ...overrides
+  };
+  const mod = await import("./index.js");
+  return mod.buildApp;
+}
+
 beforeAll(async () => {
   process.env.CLASPER_TEST_MODE = "true";
   process.env.AGENT_JWT_SECRET = "test-secret";
@@ -131,6 +146,79 @@ describe("/api/agents/send", () => {
     expect(body.task_id).toBe("existing-task");
     // Should not have called createTask since task exists
     expect(createTask).not.toHaveBeenCalled();
+  });
+});
+
+describe("Smart context endpoints", () => {
+  it("returns context stats", async () => {
+    const app = buildApp();
+    const response = await app.inject({
+      method: "GET",
+      url: "/context/stats"
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toHaveProperty("indexedChunks");
+    expect(body).toHaveProperty("indexedSkills");
+    expect(body).toHaveProperty("indexedMemoryChunks");
+    expect(body).toHaveProperty("embeddingProvider");
+  });
+
+  it("reindexes workspace", async () => {
+    const app = buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/workspace/reindex"
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toHaveProperty("indexedChunks");
+    expect(body).toHaveProperty("indexedSkills");
+    expect(body).toHaveProperty("indexedMemoryChunks");
+    expect(body).toHaveProperty("embeddingProvider");
+  });
+});
+
+describe("Smart context daemon key guardrails", () => {
+  it("rejects missing daemon key when configured", async () => {
+    const build = await buildAppWithEnv({ AGENT_DAEMON_API_KEY: "secret-key" });
+    const app = build();
+    const response = await app.inject({
+      method: "GET",
+      url: "/context/stats"
+    });
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("rejects incorrect daemon key", async () => {
+    const build = await buildAppWithEnv({ AGENT_DAEMON_API_KEY: "secret-key" });
+    const app = build();
+    const response = await app.inject({
+      method: "POST",
+      url: "/workspace/reindex",
+      headers: {
+        "x-agent-daemon-key": "wrong-key"
+      }
+    });
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("accepts correct daemon key", async () => {
+    const build = await buildAppWithEnv({ AGENT_DAEMON_API_KEY: "secret-key" });
+    const app = build();
+    const response = await app.inject({
+      method: "POST",
+      url: "/workspace/reindex",
+      headers: {
+        "x-agent-daemon-key": "secret-key"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
   });
 });
 

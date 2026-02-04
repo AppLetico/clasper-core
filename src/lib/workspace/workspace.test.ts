@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { WorkspaceLoader, resetWorkspaceLoader } from "./workspace.js";
 import { resetSkillsLoader } from "../skills/skills.js";
+import { resetDatabase } from "../core/db.js";
 
 const TEST_WORKSPACE = "./test-workspace-unit";
 
@@ -11,6 +12,8 @@ describe("WorkspaceLoader", () => {
     // Create test workspace directory
     mkdirSync(TEST_WORKSPACE, { recursive: true });
     mkdirSync(join(TEST_WORKSPACE, "souls"), { recursive: true });
+    process.env.CLASPER_DB_PATH = join(TEST_WORKSPACE, "clasper-test.db");
+    resetDatabase();
     resetWorkspaceLoader();
     resetSkillsLoader();
   });
@@ -18,6 +21,7 @@ describe("WorkspaceLoader", () => {
   afterEach(() => {
     // Clean up test workspace
     rmSync(TEST_WORKSPACE, { recursive: true, force: true });
+    resetDatabase();
     resetWorkspaceLoader();
     resetSkillsLoader();
   });
@@ -231,6 +235,56 @@ describe("WorkspaceLoader", () => {
       
       // Full mode should NOT include TOOLS.md in system prompt
       expect(prompt).not.toContain("Tool Notes");
+    });
+  });
+
+  describe("buildSmartPrompt", () => {
+    it("includes skill catalog and relevant skill instructions", async () => {
+      writeFileSync(join(TEST_WORKSPACE, "SOUL.md"), "# Persona\n\nHelpful assistant.");
+      writeFileSync(join(TEST_WORKSPACE, "AGENTS.md"), "# Rules\n\n- Be safe");
+      writeFileSync(join(TEST_WORKSPACE, "TOOLS.md"), "# Tools\n\n- Use APIs");
+
+      const skillsDir = join(TEST_WORKSPACE, "skills");
+      mkdirSync(skillsDir, { recursive: true });
+      const seoSkillDir = join(skillsDir, "seo-skill");
+      const deploySkillDir = join(skillsDir, "deploy-skill");
+      mkdirSync(seoSkillDir, { recursive: true });
+      mkdirSync(deploySkillDir, { recursive: true });
+
+      writeFileSync(
+        join(seoSkillDir, "SKILL.md"),
+        `---
+name: seo-skill
+description: SEO guidance
+---
+Use SEO keywords and structure.`
+      );
+
+      writeFileSync(
+        join(deploySkillDir, "SKILL.md"),
+        `---
+name: deploy-skill
+description: Deployment steps
+---
+Run migrations before deploy.`
+      );
+
+      writeFileSync(join(TEST_WORKSPACE, "MEMORY.md"), "SEO notes: focus on headings.");
+
+      const loader = new WorkspaceLoader(TEST_WORKSPACE);
+      const prompt = await loader.buildSmartPrompt("seo", undefined, {
+        maxSkills: 1,
+        maxMemoryChunks: 1
+      });
+
+      expect(prompt).toContain("Available Skills");
+      expect(prompt).toContain("seo-skill");
+      expect(prompt).toContain("deploy-skill");
+      expect(prompt).toContain("## Skills");
+      expect(prompt).toContain("Use SEO keywords");
+      expect(prompt).not.toContain("Run migrations before deploy");
+      expect(prompt).toContain("## Relevant Memory");
+      expect(prompt).toContain("SEO notes");
     });
   });
 

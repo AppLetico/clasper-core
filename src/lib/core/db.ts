@@ -248,6 +248,16 @@ export function initDatabase(): void {
 }
 
 /**
+ * Reset the database connection (useful for tests).
+ */
+export function resetDatabase(): void {
+  if (db) {
+    db.close();
+    db = null;
+  }
+}
+
+/**
  * Migration to add v1.2.1 operational hardening indexes
  * - risk_level column (stored, not computed) for efficient filtering
  * - has_error computed index for error filtering

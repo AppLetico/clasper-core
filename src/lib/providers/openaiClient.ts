@@ -112,14 +112,38 @@ export async function generateAgentReply(params: {
     // Allow full override via request payload
     systemPrompt = metadata.system_prompt;
   } else {
-    // Load from workspace: souls/<role>.md or SOUL.md + AGENTS.md
-    // Use promptMode to control context size (minimal for sub-agents)
-    systemPrompt = workspace.buildSystemPrompt(role, promptMode);
+    const skipSmartContext = Boolean(metadata?.skipSmartContext);
+    if (config.smartContextEnabled && promptMode === "full" && !skipSmartContext) {
+      const tokenBudget = metadata?.smart_context_token_budget ?? config.smartContextMaxTokens;
+      try {
+        systemPrompt = await workspace.buildSmartPrompt(
+          userMessage,
+          role,
+          {
+            maxSkills: metadata?.smart_context_max_skills,
+            maxMemoryChunks: metadata?.smart_context_max_memory,
+            forceIncludeSkills: metadata?.forceIncludeSkills,
+            tokenBudget: typeof tokenBudget === "number" ? tokenBudget : undefined
+          },
+          promptMode
+        );
+      } catch {
+        systemPrompt = workspace.buildSystemPrompt(role, promptMode);
+        const memoryContext = workspace.loadMemoryContext();
+        if (memoryContext) {
+          systemPrompt += "\n\n" + memoryContext;
+        }
+      }
+    } else {
+      // Load from workspace: souls/<role>.md or SOUL.md + AGENTS.md
+      // Use promptMode to control context size (minimal for sub-agents)
+      systemPrompt = workspace.buildSystemPrompt(role, promptMode);
 
-    // Inject memory files if available
-    const memoryContext = workspace.loadMemoryContext();
-    if (memoryContext) {
-      systemPrompt += "\n\n" + memoryContext;
+      // Inject memory files if available
+      const memoryContext = workspace.loadMemoryContext();
+      if (memoryContext) {
+        systemPrompt += "\n\n" + memoryContext;
+      }
     }
   }
 

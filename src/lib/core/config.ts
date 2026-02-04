@@ -73,6 +73,14 @@ export const config = {
   // Warn when context usage exceeds this percentage of the model's context window
   contextWarningThreshold: parseFloat(process.env.CLASPER_CONTEXT_WARNING_THRESHOLD || "75"),
 
+  // Smart context selection (query-aware skills + memory)
+  smartContextEnabled: process.env.CLASPER_SMART_CONTEXT === "true",
+  smartContextMaxSkills: parseInt(process.env.CLASPER_SMART_CONTEXT_MAX_SKILLS || "5", 10),
+  smartContextMaxMemoryChunks: parseInt(process.env.CLASPER_SMART_CONTEXT_MAX_MEMORY || "3", 10),
+  smartContextMaxTokens: parseInt(process.env.CLASPER_SMART_CONTEXT_MAX_TOKENS || "0", 10),
+  embeddingProvider: process.env.CLASPER_EMBEDDING_PROVIDER || "none",
+  embeddingModel: process.env.CLASPER_EMBEDDING_MODEL || "Xenova/all-MiniLM-L6-v2",
+
   // Time context (OpenClaw-inspired)
   // Default timezone for time context injection (empty = use system timezone)
   defaultTimezone: process.env.CLASPER_DEFAULT_TIMEZONE || "",

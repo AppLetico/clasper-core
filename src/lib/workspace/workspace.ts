@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join, resolve } from "path";
 import { config } from "../core/config.js";
-import { getSkillsLoader, type SkillsContext } from "../skills/skills.js";
+import { SkillsLoader, formatSkillsForPrompt, getSkillInstructions, type SkillsContext } from "../skills/skills.js";
+import { ContextSelector, type SmartContextOptions } from "../context/index.js";
 
 /**
  * Maximum characters per bootstrap file before truncation.
@@ -193,7 +194,7 @@ export class WorkspaceLoader {
    * Following OpenClaw's skills pattern.
    */
   loadSkills(): SkillsContext {
-    const loader = getSkillsLoader();
+    const loader = new SkillsLoader(this.workspacePath);
     return loader.load();
   }
 
@@ -201,7 +202,7 @@ export class WorkspaceLoader {
    * Get skill instructions for the system prompt.
    */
   getSkillInstructions(): string {
-    const loader = getSkillsLoader();
+    const loader = new SkillsLoader(this.workspacePath);
     return loader.getInstructions();
   }
 
@@ -253,6 +254,65 @@ export class WorkspaceLoader {
 
     if (parts.length === 0) {
       // Generic fallback when no workspace files exist
+      const modeNote = mode === "minimal" ? " (minimal context)" : "";
+      return `You are a helpful AI assistant${role ? ` (role: ${role})` : ""}${modeNote}. Follow instructions carefully and provide accurate, helpful responses.`;
+    }
+
+    return parts.join("\n\n");
+  }
+
+  /**
+   * Build a smart system prompt with relevance-based skill and memory selection.
+   */
+  async buildSmartPrompt(
+    query: string,
+    role?: string,
+    options: SmartContextOptions = {},
+    mode: PromptMode = "full"
+  ): Promise<string> {
+    const parts: string[] = [];
+
+    if (mode === "full") {
+      const soul = this.loadSoul(role);
+      if (soul) {
+        parts.push(soul.trim());
+      }
+    }
+
+    const agents = this.loadAgents();
+    if (agents) {
+      parts.push("## Operating Rules\n\n" + agents.trim());
+    }
+
+    const identity = this.loadIdentity();
+    if (identity) {
+      parts.push("## Identity\n\n" + identity.trim());
+    }
+
+    const tools = this.loadTools();
+    if (tools) {
+      parts.push("## Tools\n\n" + tools.trim());
+    }
+
+    if (mode === "full") {
+      const enabledSkills = this.loadSkills().skills.filter((skill) => skill.enabled);
+      const skillCatalog = formatSkillsForPrompt(enabledSkills);
+      if (skillCatalog) {
+        parts.push(skillCatalog);
+      }
+
+      const selector = new ContextSelector(this.workspacePath);
+      const selection = await selector.selectContext(query, options);
+      if (selection.skills.length > 0) {
+        parts.push(getSkillInstructions(selection.skills));
+      }
+
+      if (selection.memoryChunks.length > 0) {
+        parts.push("## Relevant Memory\n\n" + selection.memoryChunks.join("\n\n"));
+      }
+    }
+
+    if (parts.length === 0) {
       const modeNote = mode === "minimal" ? " (minimal context)" : "";
       return `You are a helpful AI assistant${role ? ` (role: ${role})` : ""}${modeNote}. Follow instructions carefully and provide accurate, helpful responses.`;
     }

@@ -48,7 +48,12 @@ Send a message to an agent session. The daemon generates a response and writes i
   "metadata": {
     "system_prompt": "Optional prompt override",
     "kickoff_plan": true,
-    "kickoff_note": "Optional note for plans"
+    "kickoff_note": "Optional note for plans",
+    "skipSmartContext": false,
+    "forceIncludeSkills": ["web-search"],
+    "smart_context_max_skills": 3,
+    "smart_context_max_memory": 2,
+    "smart_context_token_budget": 2000
   }
 }
 ```
@@ -135,6 +140,11 @@ The `messages` array allows backends to inject prior conversation turns. This en
 | `system_prompt` | Override workspace-loaded system prompt |
 | `kickoff_plan` | If true, also creates a plan document |
 | `kickoff_note` | Note text included in plan document |
+| `skipSmartContext` | If true, disables smart context selection for this request |
+| `forceIncludeSkills` | Array of skill names to always include |
+| `smart_context_max_skills` | Override max skills for smart context selection |
+| `smart_context_max_memory` | Override max memory chunks for smart context selection |
+| `smart_context_token_budget` | Token budget for smart context selection (0 = no limit) |
 
 ### Task Resolution
 
@@ -607,6 +617,42 @@ Context stats endpoint for prompt size visibility. Following OpenClaw's `/contex
 | `injectedChars` | Size after truncation (if any) |
 | `truncated` | Whether file was truncated |
 | `estimatedTokens` | Rough token estimate (~4 chars/token) |
+
+---
+
+## GET /context/stats
+
+Smart context index stats and embedding provider info.
+
+### Response
+
+```json
+{
+  "indexedChunks": 120,
+  "indexedSkills": 12,
+  "indexedMemoryChunks": 42,
+  "lastIndexedAt": "2026-02-04T12:00:00.000Z",
+  "embeddingProvider": "local"
+}
+```
+
+---
+
+## POST /workspace/reindex
+
+Rebuild the smart context index from workspace files. Protected by `X-Agent-Daemon-Key` if configured.
+
+### Response
+
+```json
+{
+  "indexedChunks": 120,
+  "indexedSkills": 12,
+  "indexedMemoryChunks": 42,
+  "lastIndexedAt": "2026-02-04T12:00:00.000Z",
+  "embeddingProvider": "local"
+}
+```
 
 ---
 

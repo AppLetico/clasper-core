@@ -39,6 +39,7 @@ Inspired by [OpenClaw](https://openclaw.ai/)'s workspace pattern, Clasper adapts
 - **Observable and explainable traces** with diff, replay, and annotations
 - **Operational guardrails** (RBAC, budgets, risk scoring, audit logs)
 - **Control Plane Contract** for portable backend integration
+- **Smart context selection** (optional relevance-based skills + memory)
 
 ## What Clasper Is Not
 
@@ -228,6 +229,14 @@ CLASPER_WORKSPACE=./workspace
 
 # Database (optional, defaults to ./clasper.db)
 CLASPER_DB_PATH=./clasper.db
+
+# Smart context (optional)
+CLASPER_SMART_CONTEXT=true
+CLASPER_SMART_CONTEXT_MAX_SKILLS=5
+CLASPER_SMART_CONTEXT_MAX_MEMORY=3
+CLASPER_SMART_CONTEXT_MAX_TOKENS=0
+CLASPER_EMBEDDING_PROVIDER=none  # none | local | openai
+CLASPER_EMBEDDING_MODEL=Xenova/all-MiniLM-L6-v2
 ```
 
 #### 4) Run
@@ -300,7 +309,7 @@ Clasper was inspired by OpenClaw's workspace pattern but evolved for a different
 
 | Pattern | OpenClaw | Clasper |
 |---------|----------|--------|
-| `memory/` directory | Local filesystem | Backend database |
+| `memory/` directory | Local filesystem | Optional workspace memory files |
 | Session persistence | Persistent daemon state | Stateless (no sessions) |
 | Self-modifying prompts | Agent can edit workspace | Workspace is read-only |
 | Shell/browser access | Full system access | API-only via Control Plane |

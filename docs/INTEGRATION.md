@@ -188,6 +188,19 @@ See [docs/examples/multi-agent/](examples/multi-agent/) for a complete example w
 
 See [WORKSPACE.md](WORKSPACE.md) for workspace file specifications.
 
+### Smart Context (Optional)
+
+Clasper can optionally select relevant skill instructions and memory chunks based on the user request. This reduces token usage without hiding the skill catalog.
+
+```bash
+CLASPER_SMART_CONTEXT=true
+CLASPER_SMART_CONTEXT_MAX_SKILLS=5
+CLASPER_SMART_CONTEXT_MAX_MEMORY=3
+CLASPER_SMART_CONTEXT_MAX_TOKENS=0
+CLASPER_EMBEDDING_PROVIDER=none  # none | local | openai
+CLASPER_EMBEDDING_MODEL=Xenova/all-MiniLM-L6-v2
+```
+
 ## Dispatcher
 
 The dispatcher polls the backend for undelivered notifications and forwards them to the daemon:

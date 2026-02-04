@@ -314,6 +314,41 @@ The system prompt can be overridden per-request via metadata:
 }
 ```
 
+## Smart Context Selection
+
+Clasper can optionally select **relevant** skill instructions and memory chunks based on the user request. This keeps prompts lean without hiding the skill catalog.
+
+**Behavior:**
+- Always includes SOUL.md + AGENTS.md
+- Always includes the **skill catalog** (names/descriptions)
+- Includes **only relevant** skill instructions and memory chunks
+- Falls back to full context if indexing fails
+
+**Enable via env:**
+
+```bash
+CLASPER_SMART_CONTEXT=true
+CLASPER_SMART_CONTEXT_MAX_SKILLS=5
+CLASPER_SMART_CONTEXT_MAX_MEMORY=3
+CLASPER_SMART_CONTEXT_MAX_TOKENS=0
+CLASPER_EMBEDDING_PROVIDER=none  # none | local | openai
+CLASPER_EMBEDDING_MODEL=Xenova/all-MiniLM-L6-v2
+```
+
+**Per-request controls:**
+
+```json
+{
+  "metadata": {
+    "skipSmartContext": false,
+    "forceIncludeSkills": ["web-search"],
+    "smart_context_max_skills": 3,
+    "smart_context_max_memory": 2,
+    "smart_context_token_budget": 2000
+  }
+}
+```
+
 ## Multi-Agent Setup
 
 For systems with multiple agent roles:
@@ -439,10 +474,10 @@ Based on research from [OpenClaw's documentation](https://docs.openclaw.ai/), cl
 |---------|----------|--------|
 | BOOTSTRAP.md (first-run ritual) | ✅ | ❌ (not needed - backend handles onboarding) |
 | BOOT.md (gateway restart) | ✅ | ❌ (stateless daemon) |
-| memory/ directory | ✅ (local filesystem) | ❌ (Mission Control database) |
-| MEMORY.md (long-term) | ✅ (local file) | ❌ (database) |
-| Skills system | ✅ (SKILL.md + ClawHub) | ❌ (backend handles capabilities) |
-| Vector memory search | ✅ (SQLite + embeddings) | ❌ (backend handles search) |
+| memory/ directory | ✅ (local filesystem) | ✅ (optional workspace memory files) |
+| MEMORY.md (long-term) | ✅ (local file) | ✅ (optional workspace memory file) |
+| Skills system | ✅ (SKILL.md + ClawHub) | ✅ (SKILL.md, registry optional) |
+| Vector memory search | ✅ (SQLite + embeddings) | ✅ (smart context, optional) |
 | Self-modifying prompts | ✅ (agent can edit workspace) | ❌ (workspace is read-only) |
 
 ## Feature Comparison: Clasper vs OpenClaw
@@ -474,6 +509,7 @@ Based on research from [OpenClaw's documentation](https://docs.openclaw.ai/), cl
 | Time/timezone context | ✅ | ✅ | Auto-injected |
 | Prompt modes (full/minimal) | ✅ | ✅ | Token optimization |
 | Bootstrap file limits | ✅ | ✅ | 20K char truncation |
+| Smart context selection | ✅ | ✅ | Optional relevance-based skills + memory |
 
 ### Cost & Usage
 
@@ -547,13 +583,13 @@ These features have been adopted from OpenClaw's architecture:
 16. **BOOT.md support** - One-time initialization instructions with completion marker
 17. **Streaming (SSE)** - `POST /api/agents/stream` for real-time response streaming
 18. **Webhooks** - Optional completion callbacks with HMAC signing
+19. **Smart context selection** - Optional relevance-based skills + memory chunking
 
 ## Future Considerations
 
 These features could be added if needed:
 
-1. **Memory file support** - Optional local memory files for agent-specific context
-2. **File caching with TTL** - Reload workspace files periodically for hot updates
-3. **Dynamic skill loading** - Load skill instructions on-demand (like OpenClaw's SKILL.md)
+1. **File caching with TTL** - Reload workspace files periodically for hot updates
+2. **Dynamic skill loading** - Load skill instructions on-demand (already partially supported via smart context)
 
 See [ARCHITECTURE.md](ARCHITECTURE.md#clasper-vs-openclaw) for a detailed comparison.

@@ -52,6 +52,7 @@ import { getWorkspacePins } from "../lib/workspace/workspacePins.js";
 import { getWorkspaceEnvironments } from "../lib/workspace/workspaceEnvironments.js";
 import { analyzeImpact, analyzeImpactFromCurrent } from "../lib/workspace/impactAnalysis.js";
 import { getWorkspaceVersioning } from "../lib/workspace/workspaceVersioning.js";
+import { getWorkspaceIndex, reindexWorkspace } from "../lib/context/index.js";
 // Skills
 import { getSkillsLoader } from "../lib/skills/skills.js";
 import { getSkillRegistry } from "../lib/skills/skillRegistry.js";
@@ -212,6 +213,36 @@ export function buildApp() {
     } catch (error) {
       return reply.status(500).send({ error: "Ops UI styles not available" });
     }
+  });
+
+  app.post("/workspace/reindex", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    try {
+      const stats = await reindexWorkspace();
+      return reply.send(stats);
+    } catch (error) {
+      return reply.status(500).send({ error: "Failed to reindex workspace" });
+    }
+  });
+
+  app.get("/context/stats", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const index = getWorkspaceIndex();
+    const stats = index.getStats();
+    return reply.send({
+      ...stats,
+      embeddingProvider: config.embeddingProvider || "none"
+    });
   });
 
   const OpsTraceListQuerySchema = z.object({
