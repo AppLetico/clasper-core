@@ -75,6 +75,11 @@ import { calculateRiskScore, type RiskScoringInput } from "../lib/governance/ris
 import { evaluateExecutionDecision } from "../lib/governance/executionDecision.js";
 import { evaluatePolicy } from "../lib/governance/policyEngine.js";
 import { issueToolToken, ToolTokenError } from "../lib/governance/toolTokens.js";
+import { createDecision, getDecision, listPendingDecisions, markDecisionTokenUsed, resolveDecision } from "../lib/governance/decisions.js";
+import { DecisionTokenError, issueDecisionToken, verifyDecisionToken } from "../lib/governance/decisionTokens.js";
+import { createExportBundle } from "../lib/exports/exportBundle.js";
+import { PolicySchema } from "../lib/policy/policySchema.js";
+import { deletePolicy, listPolicies, setPolicyEnabled, upsertPolicy } from "../lib/policy/policyStore.js";
 import { ingestAudit, ingestCost, ingestMetrics, ingestTrace, ingestViolation } from "../lib/adapters/ingest.js";
 import { requireAdapterContextFromHeaders, AdapterAuthError, type AdapterAuthContext } from "../lib/adapters/auth.js";
 import { getAdapterRegistry } from "../lib/adapters/registry.js";
@@ -272,6 +277,7 @@ export function buildApp() {
     min_cost: z.coerce.number().optional(),
     max_cost: z.coerce.number().optional(),
     risk_level: z.string().optional(),
+    trust_status: z.string().optional(),
     limit: z.coerce.number().int().min(1).max(200).default(50),
     offset: z.coerce.number().int().min(0).default(0)
   });
@@ -332,6 +338,9 @@ export function buildApp() {
       }
       if (query.risk_level) {
         summaries = summaries.filter((trace) => trace.risk.level === query.risk_level);
+      }
+      if (query.trust_status) {
+        summaries = summaries.filter((trace) => trace.trust_status === query.trust_status);
       }
 
       return reply.send({
@@ -1002,6 +1011,60 @@ export function buildApp() {
     }
   });
 
+  app.post("/ops/api/exports", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "audit:view");
+
+      const ExportSchema = z.object({
+        tenant_id: z.string().optional(),
+        workspace_id: z.string().optional(),
+        trace_id: z.string().optional(),
+        start_date: z.string().optional(),
+        end_date: z.string().optional(),
+      });
+
+      const parsed = ExportSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const { bundlePath, bundleName } = await createExportBundle({
+        tenantId,
+        workspaceId: parsed.data.workspace_id,
+        traceId: parsed.data.trace_id,
+        startDate: parsed.data.start_date,
+        endDate: parsed.data.end_date,
+      });
+
+      reply.header("Content-Type", "application/gzip");
+      reply.header("Content-Disposition", `attachment; filename="${bundleName}"`);
+      return reply.send(readFileSync(bundlePath));
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to export bundle" });
+    }
+  });
+
   app.get("/ops/api/adapters", async (request, reply) => {
     try {
       const context = await requireOpsContextFromHeaders(request.headers);
@@ -1377,6 +1440,7 @@ export function buildApp() {
     execution_id: z.string().optional(),
     tenant_id: z.string(),
     workspace_id: z.string(),
+    environment: z.string().optional(),
     adapter_id: z.string(),
     adapter_risk_class: z.enum(['low', 'medium', 'high', 'critical']).optional(),
     requested_capabilities: z.array(z.string()),
@@ -1392,6 +1456,7 @@ export function buildApp() {
     skill_pinned: z.boolean().optional(),
     custom_flags: z.array(z.string()).optional(),
     rbac_allowed: z.boolean().optional(),
+    callback_url: z.string().url().optional(),
     override: z
       .object({
         actor: z.string(),
@@ -1549,6 +1614,44 @@ export function buildApp() {
       }
 
       const decision = evaluateExecutionDecision(parsed.data);
+      if (decision.requires_approval) {
+        const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        const created = createDecision({
+          tenantId: parsed.data.tenant_id,
+          workspaceId: parsed.data.workspace_id,
+          executionId: decision.execution_id,
+          adapterId: parsed.data.adapter_id,
+          requiredRole: "release_manager",
+          expiresAt,
+          requestSnapshot: {
+            request: parsed.data,
+            decision,
+          },
+          grantedScope: (decision.granted_scope || {}) as Record<string, unknown>,
+          callbackUrl: parsed.data.callback_url,
+        });
+
+        auditLog("policy_decision_pending", {
+          tenantId: parsed.data.tenant_id,
+          workspaceId: parsed.data.workspace_id,
+          traceId: undefined,
+          eventData: {
+            decision_id: created.decision_id,
+            adapter_id: parsed.data.adapter_id,
+            execution_id: decision.execution_id,
+            required_role: created.required_role,
+            expires_at: created.expires_at,
+          },
+        });
+
+        return reply.send({
+          ...decision,
+          decision: "pending",
+          decision_id: created.decision_id,
+          expires_at: created.expires_at || undefined,
+          required_role: created.required_role || undefined,
+        });
+      }
       return reply.send(decision);
     } catch (error) {
       if (error instanceof AdapterAuthError) {
@@ -1596,14 +1699,17 @@ export function buildApp() {
       });
 
       const policy = evaluatePolicy({
+        tenant_id: adapterContext.tenantId,
+        workspace_id: adapterContext.workspaceId,
         environment: parsed.data.environment,
         tool: parsed.data.tool,
+        adapter_id: adapterContext.adapterId,
         adapter_risk_class: parsed.data.adapter_risk_class,
         skill_state: parsed.data.skill_state,
-        tenant_id: adapterContext.tenantId,
       });
 
       const db = getDatabase();
+      const policyId = policy.matched_policies?.[0];
       if (policy.decision !== "allow") {
         db.prepare(
           `
@@ -1617,7 +1723,7 @@ export function buildApp() {
           parsed.data.execution_id,
           parsed.data.tool,
           policy.decision,
-          policy.policy_id || null,
+          policyId || null,
           policy.decision === "require_approval" ? "requires_approval" : "policy_denied"
         );
 
@@ -1628,7 +1734,7 @@ export function buildApp() {
             adapter_id: adapterContext.adapterId,
             execution_id: parsed.data.execution_id,
             tool: parsed.data.tool,
-            policy_id: policy.policy_id,
+            policy_id: policyId,
             decision: policy.decision,
           },
         });
@@ -1636,7 +1742,7 @@ export function buildApp() {
         return reply.send({
           decision: "deny",
           reason: policy.decision === "require_approval" ? "approval_required" : "policy_denied",
-          policy_id: policy.policy_id,
+          policy_id: policyId,
         });
       }
 
@@ -1661,7 +1767,7 @@ export function buildApp() {
         parsed.data.execution_id,
         parsed.data.tool,
         "allow",
-        policy.policy_id || null,
+        policyId || null,
         JSON.stringify(parsed.data.requested_scope || {}),
         issued.expires_at
       );
@@ -1673,7 +1779,7 @@ export function buildApp() {
           adapter_id: adapterContext.adapterId,
           execution_id: parsed.data.execution_id,
           tool: parsed.data.tool,
-          policy_id: policy.policy_id,
+          policy_id: policyId,
           token_id: issued.jti,
           expires_at: issued.expires_at,
         },
@@ -1684,6 +1790,12 @@ export function buildApp() {
         tool_token: issued.token,
         expires_at: issued.expires_at,
         granted_scope: parsed.data.requested_scope || {},
+        policy: {
+          decision: policy.decision,
+          matched_policies: policy.matched_policies,
+          decision_trace: policy.decision_trace,
+          explanation: policy.explanation,
+        },
       });
     } catch (error) {
       if (error instanceof AdapterAuthError) {
@@ -1702,21 +1814,30 @@ export function buildApp() {
    * Policy evaluation endpoints.
    */
   const PolicyEvalSchema = z.object({
+    tenant_id: z.string().optional(),
+    workspace_id: z.string().optional(),
     environment: z.string().optional(),
     tool: z.string().optional(),
+    adapter_id: z.string().optional(),
     adapter_risk_class: z.string().optional(),
     skill_state: z.string().optional(),
-    tenant_id: z.string().optional(),
+    risk_level: z.string().optional(),
+    estimated_cost: z.number().optional(),
   });
 
   app.post("/api/policy/evaluate", async (request, reply) => {
     try {
-      await requireAdapterContextFromHeaders(request.headers);
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
       const parsed = PolicyEvalSchema.safeParse(request.body);
       if (!parsed.success) {
         return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
       }
-      const result = evaluatePolicy(parsed.data);
+      const result = evaluatePolicy({
+        ...parsed.data,
+        tenant_id: adapterContext.tenantId,
+        workspace_id: adapterContext.workspaceId,
+        adapter_id: adapterContext.adapterId,
+      });
       return reply.send(result);
     } catch (error) {
       if (error instanceof AdapterAuthError) {
@@ -1736,7 +1857,10 @@ export function buildApp() {
       if (!parsed.success) {
         return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
       }
-      const result = evaluatePolicy(parsed.data);
+      const result = evaluatePolicy({
+        ...parsed.data,
+        tenant_id: parsed.data.tenant_id || context.tenantId,
+      });
       return reply.send(result);
     } catch (error) {
       if (error instanceof PermissionError) {
@@ -1755,6 +1879,468 @@ export function buildApp() {
         return reply.status(status).send({ error: error.message, code: error.code });
       }
       const message = error instanceof Error ? error.message : "Policy dry-run failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Policy management endpoints (Ops).
+   */
+  app.get("/ops/api/policies", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "policy:view");
+
+      const PolicyQuerySchema = z.object({
+        tenant_id: z.string().optional(),
+        workspace_id: z.string().optional(),
+        environment: z.string().optional(),
+        enabled: z.string().optional(),
+      });
+
+      const parsed = PolicyQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const enabled =
+        parsed.data.enabled === undefined
+          ? undefined
+          : parsed.data.enabled === "true";
+
+      const policies = listPolicies({
+        tenantId,
+        workspaceId: parsed.data.workspace_id,
+        environment: parsed.data.environment,
+        enabled,
+      });
+
+      return reply.send({ policies });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load policies" });
+    }
+  });
+
+  app.post("/ops/api/policies", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "policy:manage");
+
+      const parsed = PolicySchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.scope?.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const record = upsertPolicy({ tenantId, policy: parsed.data });
+      return reply.send({ policy: record });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to upsert policy" });
+    }
+  });
+
+  app.patch("/ops/api/policies/:policyId", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "policy:manage");
+
+      const UpdateSchema = z.object({
+        tenant_id: z.string().optional(),
+        enabled: z.boolean(),
+      });
+
+      const parsed = UpdateSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const record = setPolicyEnabled({
+        tenantId,
+        policyId: (request.params as { policyId: string }).policyId,
+        enabled: parsed.data.enabled,
+      });
+
+      if (!record) {
+        return reply.status(404).send({ error: "Policy not found" });
+      }
+
+      return reply.send({ policy: record });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to update policy" });
+    }
+  });
+
+  app.delete("/ops/api/policies/:policyId", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "policy:manage");
+
+      const DeleteSchema = z.object({
+        tenant_id: z.string().optional(),
+      });
+
+      const parsed = DeleteSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const ok = deletePolicy({ tenantId, policyId: (request.params as { policyId: string }).policyId });
+      if (!ok) {
+        return reply.status(404).send({ error: "Policy not found" });
+      }
+
+      return reply.send({ status: "deleted" });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to delete policy" });
+    }
+  });
+
+  /**
+   * Decision polling + resolution.
+   */
+  app.get("/api/decisions/:decisionId", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const decision = getDecision((request.params as { decisionId: string }).decisionId);
+      if (!decision) {
+        return reply.status(404).send({ error: "Decision not found" });
+      }
+
+      if (
+        decision.tenant_id !== adapterContext.tenantId ||
+        decision.workspace_id !== adapterContext.workspaceId ||
+        decision.adapter_id !== adapterContext.adapterId
+      ) {
+        return reply.status(403).send({ error: "Decision scope mismatch" });
+      }
+
+      return reply.send({
+        decision_id: decision.decision_id,
+        status: decision.status,
+        required_role: decision.required_role,
+        expires_at: decision.expires_at,
+        decision_token: decision.status === "approved" ? decision.decision_token : undefined,
+        granted_scope: decision.granted_scope,
+        resolution: decision.resolution,
+        decision_token_used_at: decision.decision_token_used_at,
+      });
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Decision lookup failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.post("/api/decisions/:decisionId/consume", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const token = request.headers["x-decision-token"] as string | undefined;
+      if (!token) {
+        return reply.status(400).send({ error: "Missing X-Decision-Token" });
+      }
+
+      const decision = getDecision((request.params as { decisionId: string }).decisionId);
+      if (!decision) {
+        return reply.status(404).send({ error: "Decision not found" });
+      }
+
+      if (
+        decision.tenant_id !== adapterContext.tenantId ||
+        decision.workspace_id !== adapterContext.workspaceId ||
+        decision.adapter_id !== adapterContext.adapterId
+      ) {
+        return reply.status(403).send({ error: "Decision scope mismatch" });
+      }
+
+      const { payload } = await verifyDecisionToken(token);
+      if (
+        payload.decision_id !== decision.decision_id ||
+        payload.adapter_id !== decision.adapter_id ||
+        payload.execution_id !== decision.execution_id ||
+        payload.tenant_id !== decision.tenant_id ||
+        payload.workspace_id !== decision.workspace_id
+      ) {
+        return reply.status(403).send({ error: "Decision token claims mismatch" });
+      }
+
+      const jti = payload.jti as string | undefined;
+      if (!jti || !decision.decision_token_jti || jti !== decision.decision_token_jti) {
+        return reply.status(403).send({ error: "Decision token invalid" });
+      }
+
+      const consumed = markDecisionTokenUsed({
+        decisionId: decision.decision_id,
+        decisionTokenJti: decision.decision_token_jti,
+      });
+
+      if (!consumed) {
+        return reply.status(409).send({ error: "Decision token already used" });
+      }
+
+      return reply.send({ status: "ok" });
+    } catch (error) {
+      if (error instanceof DecisionTokenError) {
+        return reply.status(400).send({ error: error.message, code: error.code });
+      }
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Decision token consume failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.get("/ops/api/decisions", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "decision:resolve");
+
+      const QuerySchema = z.object({
+        tenant_id: z.string().optional(),
+        workspace_id: z.string().optional(),
+        status: z.enum(["pending"]).optional(),
+      });
+
+      const parsed = QuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const pending = listPendingDecisions({
+        tenantId,
+        workspaceId: parsed.data.workspace_id,
+      });
+
+      return reply.send({ decisions: pending });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load decisions" });
+    }
+  });
+
+  app.post("/api/decisions/:decisionId/resolve", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "decision:resolve");
+
+      const ResolveSchema = z.object({
+        tenant_id: z.string().optional(),
+        action: z.enum(["approve", "deny", "approve_with_override"]),
+        justification: z.string().min(10),
+        override_reason_code: z.string().optional(),
+      });
+
+      const parsed = ResolveSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const decision = getDecision((request.params as { decisionId: string }).decisionId);
+      if (!decision) {
+        return reply.status(404).send({ error: "Decision not found" });
+      }
+
+      if (decision.tenant_id !== tenantId) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      if (decision.status !== "pending") {
+        return reply.status(409).send({ error: "Decision already resolved" });
+      }
+
+      let token: { token: string; jti: string; expires_at: string } | null = null;
+      if (parsed.data.action !== "deny") {
+        token = await issueDecisionToken({
+          tenant_id: decision.tenant_id,
+          workspace_id: decision.workspace_id,
+          adapter_id: decision.adapter_id,
+          execution_id: decision.execution_id,
+          decision_id: decision.decision_id,
+          granted_scope: decision.granted_scope || {},
+        });
+      }
+
+      const resolution = {
+        action: parsed.data.action,
+        actor: context.userId,
+        role: context.role,
+        justification: parsed.data.justification,
+        override_reason_code: parsed.data.override_reason_code || null,
+        resolved_at: new Date().toISOString(),
+      };
+
+      const updated = resolveDecision({
+        decisionId: decision.decision_id,
+        status: parsed.data.action === "deny" ? "denied" : "approved",
+        resolution,
+        decisionToken: token?.token,
+        decisionTokenJti: token?.jti,
+      });
+
+      if (!updated) {
+        return reply.status(500).send({ error: "Failed to resolve decision" });
+      }
+
+      auditLog("policy_decision_resolved", {
+        tenantId: decision.tenant_id,
+        workspaceId: decision.workspace_id,
+        eventData: {
+          decision_id: decision.decision_id,
+          action: parsed.data.action,
+          actor: context.userId,
+          role: context.role,
+        },
+      });
+
+      if (updated.callback_url) {
+        fetch(updated.callback_url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            decision_id: updated.decision_id,
+            status: updated.status,
+            decision_token: updated.decision_token,
+            expires_at: updated.expires_at,
+            granted_scope: updated.granted_scope,
+            resolution: updated.resolution,
+          }),
+        }).catch(() => {
+          // Swallow callback failures (adapter can still poll)
+        });
+      }
+
+      return reply.send({
+        decision: updated,
+        decision_token: updated.decision_token,
+        expires_at: token?.expires_at,
+      });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      if (error instanceof DecisionTokenError) {
+        return reply.status(500).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Decision resolve failed";
       return reply.status(500).send({ error: message });
     }
   });

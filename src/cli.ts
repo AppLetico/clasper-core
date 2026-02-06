@@ -7,9 +7,11 @@
  */
 import { Command } from "commander";
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { generateKeyPairSync } from "node:crypto";
+import { verifyExportBundle } from "./lib/exports/verifyBundle.js";
 
 // Enforce TLS 1.3 minimum before any network operations
 import * as tls from "node:tls";
@@ -103,6 +105,84 @@ program
   .description("Run a daily standup (set USER_ID, AGENT_ROLE)")
   .action(() => {
     spawn("node", ["dist/scripts/daily_standup.js"], { stdio: "inherit" });
+  });
+
+program
+  .command("export")
+  .description("Create a verifiable export bundle (Ops API)")
+  .option("--base-url <url>", "Ops API base URL", "http://localhost:8081")
+  .option("--token <token>", "OIDC access token")
+  .option("--tenant-id <id>", "Tenant ID")
+  .option("--workspace-id <id>", "Workspace ID")
+  .option("--trace-id <id>", "Trace ID")
+  .option("--start-date <iso>", "Start date (ISO)")
+  .option("--end-date <iso>", "End date (ISO)")
+  .option("--out <path>", "Output bundle path", `./clasper-export-${Date.now()}.tar.gz`)
+  .action(async (opts) => {
+    const payload = {
+      tenant_id: opts.tenantId,
+      workspace_id: opts.workspaceId,
+      trace_id: opts.traceId,
+      start_date: opts.startDate,
+      end_date: opts.endDate,
+    };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (opts.token) {
+      headers.Authorization = `Bearer ${opts.token}`;
+    }
+    const response = await fetch(`${opts.baseUrl}/ops/api/exports`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      console.error(`Export failed: ${response.status} ${text}`);
+      process.exit(1);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    writeFileSync(opts.out, buffer);
+    console.log(`Export saved to ${opts.out}`);
+  });
+
+program
+  .command("verify <bundle>")
+  .description("Verify a Clasper export bundle offline")
+  .action(async (bundle) => {
+    const result = await verifyExportBundle(bundle);
+    if (!result.ok) {
+      console.error("Verification failed.");
+      if (result.failures.length) console.error("Failures:", result.failures);
+      if (result.fileFailures.length) console.error("File failures:", result.fileFailures);
+      if (result.auditChainFailures.length) console.error("Audit chain failures:", result.auditChainFailures);
+      process.exit(1);
+    }
+    console.log("Verification OK.");
+    if (result.signatureVerified !== null) {
+      console.log(`Signature verified: ${result.signatureVerified ? "yes" : "no"}`);
+    }
+  });
+
+program
+  .command("keys:generate")
+  .description("Generate Ed25519 signing keys for export bundles")
+  .option("--out <path>", "Output base path (no extension)", "./config/keys/clasper-export-key")
+  .action((opts) => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privatePem = privateKey.export({ format: "pem", type: "pkcs8" }) as string;
+    const publicJwk = publicKey.export({ format: "jwk" }) as Record<string, unknown>;
+
+    const privatePath = `${opts.out}.pem`;
+    const publicPath = `${opts.out}.public.jwk.json`;
+
+    mkdirSync(dirname(privatePath), { recursive: true });
+    writeFileSync(privatePath, privatePem);
+    writeFileSync(publicPath, JSON.stringify(publicJwk, null, 2));
+
+    console.log(`Private key: ${privatePath}`);
+    console.log(`Public key: ${publicPath}`);
   });
 
 program.parse();

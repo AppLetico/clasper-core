@@ -47,7 +47,9 @@ export type AuditEventType =
   | 'adapter_metrics_ingested'
   | 'adapter_violation_reported'
   | 'adapter_telemetry_unsigned'
-  | 'adapter_telemetry_signature_invalid';
+  | 'adapter_telemetry_signature_invalid'
+  | 'policy_decision_pending'
+  | 'policy_decision_resolved';
 
 /**
  * An entry in the audit log

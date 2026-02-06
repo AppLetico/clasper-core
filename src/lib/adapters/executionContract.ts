@@ -40,6 +40,18 @@ export interface ExecutionDecision {
   granted_scope?: ExecutionScope;
   blocked_reason?: string;
   requires_approval?: boolean;
+  decision?: 'allow' | 'deny' | 'require_approval' | 'pending';
+  decision_id?: string;
+  expires_at?: string;
+  required_role?: string;
+  matched_policies?: string[];
+  decision_trace?: {
+    policy_id: string;
+    result: 'matched' | 'skipped';
+    decision?: 'allow' | 'deny' | 'require_approval';
+    explanation?: string;
+  }[];
+  explanation?: string;
 }
 
 export const ExecutionDecisionSchema = z.object({
@@ -48,4 +60,20 @@ export const ExecutionDecisionSchema = z.object({
   granted_scope: ExecutionScopeSchema.optional(),
   blocked_reason: z.string().optional(),
   requires_approval: z.boolean().optional(),
+  decision: z.enum(['allow', 'deny', 'require_approval', 'pending']).optional(),
+  decision_id: z.string().optional(),
+  expires_at: z.string().optional(),
+  required_role: z.string().optional(),
+  matched_policies: z.array(z.string()).optional(),
+  decision_trace: z
+    .array(
+      z.object({
+        policy_id: z.string(),
+        result: z.enum(['matched', 'skipped']),
+        decision: z.enum(['allow', 'deny', 'require_approval']).optional(),
+        explanation: z.string().optional(),
+      })
+    )
+    .optional(),
+  explanation: z.string().optional(),
 });

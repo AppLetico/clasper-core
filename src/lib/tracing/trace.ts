@@ -111,6 +111,12 @@ export interface ExecutionViolation {
   timestamp: string;
 }
 
+export type TrustStatus =
+  | 'verified'
+  | 'verified_with_violations'
+  | 'unverified'
+  | 'compromised';
+
 /**
  * Complete agent execution trace
  */
@@ -178,6 +184,9 @@ export interface AgentTrace {
   integrity_status?: 'verified' | 'compromised' | 'unsigned' | 'unverified';
   integrity_failures?: string[];
   integrity_checked_at?: string;
+
+  // Trust status (derived + persisted)
+  trust_status?: TrustStatus;
 }
 
 // ============================================================================
@@ -302,6 +311,9 @@ export const AgentTraceSchema = z.object({
   integrity_status: z.enum(['verified', 'compromised', 'unsigned', 'unverified']).optional(),
   integrity_failures: z.array(z.string()).optional(),
   integrity_checked_at: z.string().optional(),
+  trust_status: z
+    .enum(['verified', 'verified_with_violations', 'unverified', 'compromised'])
+    .optional(),
 });
 
 // ============================================================================

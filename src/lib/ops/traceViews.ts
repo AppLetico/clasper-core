@@ -56,6 +56,7 @@ export interface TraceSummaryView {
     status: string;
     failures: string[];
   };
+  trust_status: string;
 }
 
 /**
@@ -249,7 +250,8 @@ export function buildTraceSummaryView(params: {
     integrity: {
       status: trace.integrity_status || "unverified",
       failures: trace.integrity_failures || []
-    }
+    },
+    trust_status: trace.trust_status || "unverified"
   };
 }
 

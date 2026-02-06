@@ -89,7 +89,8 @@ export function initDatabase(): void {
       integrity_status TEXT DEFAULT 'unverified',
       integrity_failures JSON,
       integrity_checked_at TEXT,
-      risk_level TEXT DEFAULT 'low'
+      risk_level TEXT DEFAULT 'low',
+      trust_status TEXT DEFAULT 'unverified'
     );
 
     CREATE INDEX IF NOT EXISTS idx_traces_tenant
@@ -241,6 +242,51 @@ export function initDatabase(): void {
       ON tool_authorizations(tenant_id, created_at DESC);
   `);
 
+  // Policies table - declarative governance rules
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS policies (
+      tenant_id TEXT NOT NULL,
+      policy_id TEXT NOT NULL,
+      workspace_id TEXT,
+      environment TEXT,
+      precedence INTEGER DEFAULT 0,
+      enabled INTEGER DEFAULT 1,
+      policy_json JSON NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (tenant_id, policy_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_policies_scope
+      ON policies(tenant_id, workspace_id, environment, enabled, precedence);
+  `);
+
+  // Decisions table - async approvals
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS decisions (
+      decision_id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      execution_id TEXT NOT NULL,
+      adapter_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      required_role TEXT,
+      expires_at TEXT,
+      request_snapshot JSON,
+      granted_scope JSON,
+      resolution JSON,
+      callback_url TEXT,
+      decision_token TEXT,
+      decision_token_jti TEXT,
+      decision_token_used_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_decisions_status
+      ON decisions(tenant_id, status, updated_at DESC);
+  `);
+
   // Workspace versions table - for workspace versioning
   db.exec(`
     CREATE TABLE IF NOT EXISTS workspace_versions (
@@ -350,6 +396,7 @@ export function initDatabase(): void {
   runAdapterTraceColumnsMigration();
   runAdapterKeyColumnsMigration();
   runTraceIntegrityColumnsMigration();
+  runTrustStatusColumnMigration();
 }
 
 /**
@@ -574,6 +621,21 @@ function runTraceIntegrityColumnsMigration(): void {
   }
   if (!hasIntegrityCheckedAt) {
     database.exec(`ALTER TABLE traces ADD COLUMN integrity_checked_at TEXT;`);
+  }
+}
+
+/**
+ * Migration to add trust status column.
+ */
+function runTrustStatusColumnMigration(): void {
+  const database = getDatabase();
+  const columns = database
+    .prepare("PRAGMA table_info(traces)")
+    .all() as { name: string }[];
+
+  const hasTrustStatus = columns.some((c) => c.name === 'trust_status');
+  if (!hasTrustStatus) {
+    database.exec(`ALTER TABLE traces ADD COLUMN trust_status TEXT DEFAULT 'unverified';`);
   }
 }
 

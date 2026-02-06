@@ -33,6 +33,11 @@ export type Permission =
   | "dashboard:view"
   // Audit
   | "audit:view"
+  // Policy
+  | "policy:view"
+  | "policy:manage"
+  // Decisions
+  | "decision:resolve"
   // Adapter registry
   | "adapter:view"
   | "adapter:manage_keys"
@@ -71,6 +76,13 @@ export const PERMISSIONS: Record<Permission, OpsRole[]> = {
 
   // Audit
   "audit:view": ["operator", "release_manager", "admin"],
+
+  // Policy
+  "policy:view": ["operator", "release_manager", "admin"],
+  "policy:manage": ["release_manager", "admin"],
+
+  // Decisions
+  "decision:resolve": ["release_manager", "admin"],
 
   // Adapter registry
   "adapter:view": ["operator", "release_manager", "admin"],

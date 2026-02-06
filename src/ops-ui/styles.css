@@ -60,7 +60,7 @@ body {
 
 .filters {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(6, minmax(0, 1fr)) auto;
   gap: 8px;
   margin-bottom: 12px;
 }
@@ -87,7 +87,7 @@ body {
 
 .row {
   display: grid;
-  grid-template-columns: 2.2fr 0.6fr 0.8fr 0.8fr 0.7fr 0.7fr 0.8fr 0.8fr;
+  grid-template-columns: 2.2fr 0.6fr 0.8fr 0.8fr 0.7fr 0.7fr 0.9fr 0.8fr 0.8fr;
   gap: 8px;
   padding: 8px;
   background: #0f172a;
@@ -393,6 +393,30 @@ body {
   color: #93c5fd;
   font-size: 12px;
   margin-bottom: 12px;
+}
+
+/* Decision cards */
+.decision-card {
+  padding: 12px;
+  background: #0f172a;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+
+.decision-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.decision-actions button {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #374151;
+  background: #2563eb;
+  color: #e5e7eb;
+  cursor: pointer;
 }
 
 /* Disabled button styles */

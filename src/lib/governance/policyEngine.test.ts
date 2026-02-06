@@ -1,65 +1,66 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { existsSync, rmSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
-
-const TEST_POLICY_DIR = join(process.cwd(), '.test-policies');
-const TEST_POLICY_PATH = join(TEST_POLICY_DIR, 'policies.yaml');
-process.env.CLASPER_POLICY_PATH = TEST_POLICY_PATH;
-
-import { config } from '../core/config.js';
+import { initDatabase, resetDatabase } from '../core/db.js';
 import { evaluatePolicy } from './policyEngine.js';
+import { upsertPolicy } from '../policy/policyStore.js';
+
+// Use a dedicated subdir so we don't remove .test-db/tool-tokens when running in parallel
+const TEST_DB_DIR = join(process.cwd(), '.test-db', 'policy-engine');
+const TEST_DB_PATH = join(TEST_DB_DIR, 'policy-engine.db');
+process.env.CLASPER_DB_PATH = TEST_DB_PATH;
 
 beforeEach(() => {
-  if (!existsSync(TEST_POLICY_DIR)) {
-    mkdirSync(TEST_POLICY_DIR, { recursive: true });
+  if (!existsSync(TEST_DB_DIR)) {
+    mkdirSync(TEST_DB_DIR, { recursive: true });
   }
-  config.policyPath = TEST_POLICY_PATH;
+  resetDatabase();
+  initDatabase();
 });
 
 afterEach(() => {
-  if (existsSync(TEST_POLICY_DIR)) {
-    rmSync(TEST_POLICY_DIR, { recursive: true, force: true });
+  resetDatabase();
+  if (existsSync(TEST_DB_DIR)) {
+    rmSync(TEST_DB_DIR, { recursive: true, force: true });
   }
 });
 
 describe('Policy engine', () => {
-  it('denies by default when no policy matches', () => {
-    writeFileSync(TEST_POLICY_PATH, 'policies: []');
+  it('allows by default when no policy matches', () => {
     const result = evaluatePolicy({ tool: 'filesystem.write', tenant_id: 't1' });
-    expect(result.decision).toBe('deny');
+    expect(result.decision).toBe('allow');
   });
 
   it('allows when a matching rule exists', () => {
-    writeFileSync(
-      TEST_POLICY_PATH,
-      `
-policies:
-  - policy_id: allow_fs_write
-    if:
-      tool: filesystem.write
-    then:
-      allow: true
-`
-    );
-    const result = evaluatePolicy({ tool: 'filesystem.write' });
+    upsertPolicy({
+      tenantId: 't1',
+      policy: {
+        policy_id: 'allow_fs_write',
+        scope: { tenant_id: 't1' },
+        subject: { type: 'tool', name: 'filesystem.write' },
+        effect: { decision: 'allow' },
+      },
+    });
+    const result = evaluatePolicy({ tool: 'filesystem.write', tenant_id: 't1' });
     expect(result.decision).toBe('allow');
-    expect(result.policy_id).toBe('allow_fs_write');
+    expect(result.matched_policies).toContain('allow_fs_write');
   });
 
   it('requires approval when rule demands it', () => {
-    writeFileSync(
-      TEST_POLICY_PATH,
-      `
-policies:
-  - policy_id: prod_fs_write
-    if:
-      environment: prod
-      tool: filesystem.write
-    then:
-      require_approval: true
-`
-    );
-    const result = evaluatePolicy({ environment: 'prod', tool: 'filesystem.write' });
+    upsertPolicy({
+      tenantId: 't1',
+      policy: {
+        policy_id: 'prod_fs_write',
+        scope: { tenant_id: 't1', environment: 'prod' },
+        subject: { type: 'tool', name: 'filesystem.write' },
+        effect: { decision: 'require_approval' },
+      },
+    });
+    const result = evaluatePolicy({
+      environment: 'prod',
+      tool: 'filesystem.write',
+      tenant_id: 't1',
+    });
     expect(result.decision).toBe('require_approval');
   });
 });

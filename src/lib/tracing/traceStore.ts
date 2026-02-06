@@ -8,6 +8,7 @@
 import { getDatabase } from '../core/db.js';
 import type { AgentTrace, TraceStep, ToolCallTrace } from './trace.js';
 import type { TraceIntegrityStatus } from './traceIntegrity.js';
+import { resolveTrustStatus, type TrustStatus } from './trustStatus.js';
 
 // ============================================================================
 // Types
@@ -58,7 +59,7 @@ export class TraceStore {
         output_message, input_tokens, output_tokens, total_cost,
         steps, tool_calls, skill_versions, redacted_prompt, error, labels,
         task_id, document_id, message_id, adapter_id, granted_scope, used_scope, violations,
-        integrity_status, integrity_failures, integrity_checked_at, risk_level
+        integrity_status, integrity_failures, integrity_checked_at, risk_level, trust_status
       ) VALUES (
         ?, ?, ?, ?,
         ?, ?, ?,
@@ -66,7 +67,7 @@ export class TraceStore {
         ?, ?,
         ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       )
     `);
 
@@ -103,7 +104,8 @@ export class TraceStore {
       trace.integrity_status || null,
       JSON.stringify(trace.integrity_failures || null),
       trace.integrity_checked_at || null,
-      (trace as { risk_level?: string }).risk_level || 'low'
+      (trace as { risk_level?: string }).risk_level || 'low',
+      trace.trust_status || null
     );
   }
 
@@ -412,6 +414,12 @@ export class TraceStore {
     const integrityFailures = row.integrity_failures
       ? JSON.parse(row.integrity_failures)
       : undefined;
+    const trustStatus =
+      row.trust_status || resolveTrustStatus({
+        integrity_status: (row.integrity_status as TraceIntegrityStatus | undefined) || undefined,
+        integrity_failures: integrityFailures,
+        violations,
+      });
 
     return {
       id: row.id,
@@ -454,6 +462,7 @@ export class TraceStore {
       integrity_status: (row.integrity_status as TraceIntegrityStatus | undefined) || undefined,
       integrity_failures: integrityFailures,
       integrity_checked_at: row.integrity_checked_at || undefined,
+      trust_status: trustStatus as TrustStatus,
     };
   }
 
@@ -541,6 +550,7 @@ interface TraceRow {
   integrity_failures: string | null;
   integrity_checked_at: string | null;
   risk_level: string | null;
+  trust_status: string | null;
 }
 
 // ============================================================================

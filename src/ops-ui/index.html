@@ -35,6 +35,13 @@
             <option value="high">High</option>
             <option value="critical">Critical</option>
           </select>
+          <select id="trustFilter">
+            <option value="">Trust status</option>
+            <option value="verified">Verified</option>
+            <option value="verified_with_violations">Verified (violations)</option>
+            <option value="unverified">Unverified</option>
+            <option value="compromised">Compromised</option>
+          </select>
           <button id="refreshTraces">Refresh</button>
         </div>
         <div id="traceTable" class="table"></div>
@@ -96,6 +103,13 @@
             <button id="loadToolAuth">Load Tool Authorizations</button>
           </div>
           <div id="toolAuthList" class="detail-block muted">No tool authorization data.</div>
+        </div>
+        <div class="promotion-panel">
+          <h3>Pending Approvals</h3>
+          <div class="promotion-form">
+            <button id="loadDecisions">Load Pending Decisions</button>
+          </div>
+          <div id="decisionList" class="detail-block muted">No pending approvals.</div>
         </div>
       </section>
 

@@ -27,6 +27,12 @@ export const config = {
   toolTokenAlgorithm: process.env.CLASPER_TOOL_TOKEN_ALGORITHM || "HS256",
   toolAuthorizationMode: process.env.CLASPER_TOOL_AUTH_MODE || "warn",
   policyPath: process.env.CLASPER_POLICY_PATH || "./config/policies.yaml",
+  decisionTokenSecret: process.env.CLASPER_DECISION_TOKEN_SECRET || "",
+  decisionTokenAlgorithm: process.env.CLASPER_DECISION_TOKEN_ALGORITHM || "HS256",
+  decisionTokenTtlSeconds: parseInt(process.env.CLASPER_DECISION_TOKEN_TTL_SECONDS || "600", 10),
+  exportSigningMode: process.env.CLASPER_EXPORT_SIGNING_MODE || "off",
+  exportSigningKeyPath: process.env.CLASPER_EXPORT_SIGNING_KEY_PATH || "",
+  exportSigningKeyId: process.env.CLASPER_EXPORT_SIGNING_KEY_ID || "",
   // Ops Console (OIDC + RBAC)
   opsOidcIssuer: process.env.OPS_OIDC_ISSUER || "",
   opsOidcAudience: process.env.OPS_OIDC_AUDIENCE || "",

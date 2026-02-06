@@ -3,6 +3,7 @@ import { getDatabase } from '../core/db.js';
 import { AgentTraceSchema } from '../tracing/trace.js';
 import { getTraceStore } from '../tracing/traceStore.js';
 import { verifyTraceIntegrity } from '../tracing/traceIntegrity.js';
+import { resolveTrustStatus } from '../tracing/trustStatus.js';
 import { consumeToolToken } from '../governance/toolTokens.js';
 import { config } from '../core/config.js';
 import { auditLog } from '../governance/auditLog.js';
@@ -77,6 +78,7 @@ export function ingestTrace(payload: unknown): IngestResult {
   trace.integrity_status = integrity.status;
   trace.integrity_failures = integrity.failures;
   trace.integrity_checked_at = new Date().toISOString();
+  trace.trust_status = resolveTrustStatus(trace);
   getTraceStore().save(trace);
 
   auditLog('adapter_trace_ingested', {

@@ -13,6 +13,7 @@ const workspaceFilter = document.getElementById("workspaceFilter");
 const agentFilter = document.getElementById("agentFilter");
 const statusFilter = document.getElementById("statusFilter");
 const riskFilter = document.getElementById("riskFilter");
+const trustFilter = document.getElementById("trustFilter");
 const refreshTraces = document.getElementById("refreshTraces");
 const promoWorkspace = document.getElementById("promoWorkspace");
 const promoSource = document.getElementById("promoSource");
@@ -43,6 +44,8 @@ const loadAdaptersButton = document.getElementById("loadAdapters");
 const adapterList = document.getElementById("adapterList");
 const loadToolAuthButton = document.getElementById("loadToolAuth");
 const toolAuthList = document.getElementById("toolAuthList");
+const loadDecisionsButton = document.getElementById("loadDecisions");
+const decisionList = document.getElementById("decisionList");
 
 // Override modal elements
 const overrideModal = document.getElementById("overrideModal");
@@ -159,6 +162,16 @@ function applyPermissions(permissions) {
     } else {
       loadToolAuthButton.disabled = true;
       loadToolAuthButton.title = "Requires audit:view permission";
+    }
+  }
+
+  if (loadDecisionsButton) {
+    if (hasPermission("decision:resolve")) {
+      loadDecisionsButton.disabled = false;
+      loadDecisionsButton.title = "";
+    } else {
+      loadDecisionsButton.disabled = true;
+      loadDecisionsButton.title = "Requires decision:resolve permission";
     }
   }
 }
@@ -289,6 +302,7 @@ function renderTraces(traces) {
         <div class="cell">${trace.adapter_id || "-"}</div>
         <div class="cell">${trace.status}</div>
         <div class="cell">${trace.risk.level}</div>
+        <div class="cell">${trace.trust_status || "-"}</div>
         <div class="cell">${formatCost(trace.cost)}</div>
         <div class="cell">${trace.duration_ms || "-"}</div>
       </div>
@@ -303,6 +317,7 @@ function renderTraces(traces) {
       <div class="cell">Adapter</div>
       <div class="cell">Status</div>
       <div class="cell">Risk</div>
+      <div class="cell">Trust</div>
       <div class="cell">Cost</div>
       <div class="cell">Duration (ms)</div>
     </div>
@@ -332,6 +347,7 @@ function renderDetail(trace) {
       <div><strong>Trace:</strong> ${trace.id}</div>
       <div><strong>Status:</strong> ${trace.status}</div>
       <div><strong>Risk:</strong> ${trace.risk.level} (${trace.risk.score})</div>
+      <div><strong>Trust:</strong> ${trace.trust_status || "-"}</div>
       <div><strong>Model:</strong> ${trace.model}</div>
       <div><strong>Cost:</strong> ${formatCost(trace.cost)}</div>
       <div><strong>Environment:</strong> ${trace.environment}</div>
@@ -508,6 +524,7 @@ async function loadTraces() {
   if (agentFilter.value) params.set("agent_role", agentFilter.value);
   if (statusFilter.value) params.set("status", statusFilter.value);
   if (riskFilter.value) params.set("risk_level", riskFilter.value);
+  if (trustFilter?.value) params.set("trust_status", trustFilter.value);
 
   const response = await fetch(`/ops/api/traces?${params.toString()}`, {
     headers: headers()
@@ -893,6 +910,100 @@ async function loadToolAuthorizations() {
   renderToolAuthorizations(data.authorizations || []);
 }
 
+function renderDecisions(decisions) {
+  if (!decisionList) return;
+  if (!decisions.length) {
+    decisionList.innerHTML = "No pending approvals.";
+    return;
+  }
+
+  decisionList.innerHTML = decisions
+    .map((decision) => {
+      const snapshot = decision.request_snapshot || {};
+      const decisionInfo = snapshot.decision || {};
+      const matched = (decisionInfo.matched_policies || []).join(", ") || "-";
+      const explanation = decisionInfo.explanation || "-";
+      const traceLines = (decisionInfo.decision_trace || [])
+        .filter((entry) => entry.result === "matched")
+        .map((entry) => `${entry.policy_id} → ${entry.decision || "-"}`)
+        .join(", ");
+
+      return `
+        <div class="decision-card" data-decision="${decision.decision_id}">
+          <strong>${decision.decision_id}</strong>
+          <div>Adapter: ${decision.adapter_id}</div>
+          <div>Execution: ${decision.execution_id}</div>
+          <div>Required role: ${decision.required_role || "-"}</div>
+          <div>Expires: ${decision.expires_at || "-"}</div>
+          <div>Matched policies: ${matched}</div>
+          <div>Decision trace: ${traceLines || "-"}</div>
+          <div>Explanation: ${explanation}</div>
+          <div class="decision-actions">
+            <button data-action="approve">Approve</button>
+            <button data-action="deny">Deny</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("<hr />");
+
+  decisionList.querySelectorAll(".decision-card button").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const action = event.target.getAttribute("data-action");
+      const card = event.target.closest(".decision-card");
+      const decisionId = card?.dataset.decision;
+      if (!action || !decisionId) return;
+
+      const justification = prompt(
+        `Provide justification for ${action} (min 10 chars):`
+      );
+      if (!justification || justification.trim().length < 10) {
+        alert("Justification must be at least 10 characters.");
+        return;
+      }
+
+      const response = await fetch(`/api/decisions/${decisionId}/resolve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...headers()
+        },
+        body: JSON.stringify({
+          action,
+          justification: justification.trim()
+        })
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        alert(`Failed to resolve decision: ${text}`);
+        return;
+      }
+
+      loadDecisions();
+    });
+  });
+}
+
+async function loadDecisions() {
+  if (!decisionList) return;
+  decisionList.textContent = "Loading decisions...";
+  const params = new URLSearchParams();
+  if (tenantFilter.value) params.set("tenant_id", tenantFilter.value);
+
+  const response = await fetch(`/ops/api/decisions?${params.toString()}`, {
+    headers: headers()
+  });
+
+  if (!response.ok) {
+    decisionList.textContent = "Failed to load decisions.";
+    return;
+  }
+
+  const data = await response.json();
+  renderDecisions(data.decisions || []);
+}
+
 saveTokenButton.addEventListener("click", () => {
   setToken(tokenInput.value.trim());
   fetchMe();
@@ -948,6 +1059,12 @@ if (loadAdaptersButton) {
 if (loadToolAuthButton) {
   loadToolAuthButton.addEventListener("click", () => {
     loadToolAuthorizations();
+  });
+}
+
+if (loadDecisionsButton) {
+  loadDecisionsButton.addEventListener("click", () => {
+    loadDecisions();
   });
 }
 
