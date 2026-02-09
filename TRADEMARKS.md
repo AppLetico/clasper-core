@@ -1,6 +1,6 @@
 # Clasper Trademark Guidelines
 
-This repository is MIT-licensed, but the **Clasper** and **Clasper Cloud** names and logos are trademarks.
+This repository is Apache 2.0–licensed, but the **Clasper** and **Clasper Cloud** names and logos are trademarks.
 These guidelines prevent confusion and bad-faith SaaS clones.
 
 ## Allowed (without permission)
