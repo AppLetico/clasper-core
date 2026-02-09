@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <defs>
+    <path id="h1" d="M 35 26 L 55.78 38 L 55.78 62 L 35 74 L 14.22 62 L 14.22 38 Z"/>
+    <path id="h2" d="M 65 26 L 85.78 38 L 85.78 62 L 65 74 L 44.22 62 L 44.22 38 Z"/>
+    <mask id="cut-h1">
+      <rect width="100" height="100" fill="white"/>
+      <path d="M 65 74 L 44.22 62" stroke="black" stroke-width="26"/>
+    </mask>
+    <mask id="cut-h2">
+      <rect width="100" height="100" fill="white"/>
+      <path d="M 35 26 L 55.78 38" stroke="black" stroke-width="26"/>
+    </mask>
+  </defs>
+  <g stroke="#f8fafc" stroke-width="12">
+    <use href="#h1" mask="url(#cut-h1)"/>
+    <use href="#h2" mask="url(#cut-h2)"/>
+  </g>
+</svg>

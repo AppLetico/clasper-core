@@ -21,27 +21,12 @@ export const config = {
   agentJwtAlgorithm: process.env.AGENT_JWT_ALGORITHM || "HS256",
   adapterJwtSecret: process.env.ADAPTER_JWT_SECRET || "",
   adapterJwtAlgorithm: process.env.ADAPTER_JWT_ALGORITHM || "HS256",
-  telemetrySignatureMode: process.env.CLASPER_TELEMETRY_SIGNATURE_MODE || "warn",
-  telemetryMaxSkewSeconds: parseInt(process.env.CLASPER_TELEMETRY_MAX_SKEW_SECONDS || "300", 10),
-  toolTokenSecret: process.env.CLASPER_TOOL_TOKEN_SECRET || "",
-  toolTokenAlgorithm: process.env.CLASPER_TOOL_TOKEN_ALGORITHM || "HS256",
-  toolAuthorizationMode: process.env.CLASPER_TOOL_AUTH_MODE || "warn",
   policyPath: process.env.CLASPER_POLICY_PATH || "./config/policies.yaml",
-  decisionTokenSecret: process.env.CLASPER_DECISION_TOKEN_SECRET || "",
-  decisionTokenAlgorithm: process.env.CLASPER_DECISION_TOKEN_ALGORITHM || "HS256",
-  decisionTokenTtlSeconds: parseInt(process.env.CLASPER_DECISION_TOKEN_TTL_SECONDS || "600", 10),
-  exportSigningMode: process.env.CLASPER_EXPORT_SIGNING_MODE || "off",
-  exportSigningKeyPath: process.env.CLASPER_EXPORT_SIGNING_KEY_PATH || "",
-  exportSigningKeyId: process.env.CLASPER_EXPORT_SIGNING_KEY_ID || "",
-  // Ops Console (OIDC + RBAC)
-  opsOidcIssuer: process.env.OPS_OIDC_ISSUER || "",
-  opsOidcAudience: process.env.OPS_OIDC_AUDIENCE || "",
-  opsOidcJwksUrl: process.env.OPS_OIDC_JWKS_URL || "",
-  opsRoleClaim: process.env.OPS_RBAC_CLAIM || "roles",
-  opsTenantClaim: process.env.OPS_TENANT_CLAIM || "tenant_id",
-  opsWorkspaceClaim: process.env.OPS_WORKSPACE_CLAIM || "workspace_id",
-  opsAllowedTenantsClaim: process.env.OPS_ALLOWED_TENANTS_CLAIM || "allowed_tenants",
-  opsDevNoAuth: process.env.OPS_DEV_NO_AUTH === "true",
+  // Local single-tenant scope
+  localTenantId: process.env.CLASPER_LOCAL_TENANT_ID || "local",
+  localWorkspaceId: process.env.CLASPER_LOCAL_WORKSPACE_ID || "local",
+  // Local Ops auth (single-tenant)
+  opsLocalApiKey: process.env.OPS_LOCAL_API_KEY || "",
 
   // ===== Multi-Provider LLM Configuration =====
   // Default LLM provider (openai, anthropic, google, xai, groq, mistral, openrouter)
@@ -107,7 +92,11 @@ export const config = {
   // Example: "https://app.example.com/tasks/{id}"
   deepLinkTaskTemplate: process.env.DEEP_LINK_TASK_TEMPLATE || "",
   deepLinkDocTemplate: process.env.DEEP_LINK_DOC_TEMPLATE || "",
-  deepLinkMsgTemplate: process.env.DEEP_LINK_MSG_TEMPLATE || ""
+  deepLinkMsgTemplate: process.env.DEEP_LINK_MSG_TEMPLATE || "",
+
+  // In Core (OSS) there is no approval UI; require_approval would block the agent with no way to unblock.
+  // Default: treat require_approval as allow and audit it. Set to "block" to preserve strict blocking (agent stays stuck unless override is used).
+  requireApprovalInCore: process.env.CLASPER_REQUIRE_APPROVAL_IN_CORE === "block" ? "block" : "allow",
 };
 
 export function requireEnv(name: string, value: string) {

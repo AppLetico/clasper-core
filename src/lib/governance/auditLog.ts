@@ -1,21 +1,12 @@
 /**
- * Audit Log
+ * Audit Log (self-attested)
  *
- * Immutable, append-only log of events for compliance and debugging.
- * Stored in SQLite with no UPDATE/DELETE operations exposed.
+ * Local, append-only audit entries stored in SQLite.
+ * No external proof or signing is produced in OSS.
  */
 
 import { getDatabase } from '../core/db.js';
-import { stableStringify, type JsonValue } from '../security/stableJson.js';
-import { sha256Hex, formatSha256 } from '../security/sha256.js';
 
-// ============================================================================
-// Types
-// ============================================================================
-
-/**
- * Types of events that can be logged
- */
 export type AuditEventType =
   | 'agent_execution_started'
   | 'agent_execution_completed'
@@ -46,14 +37,10 @@ export type AuditEventType =
   | 'adapter_cost_ingested'
   | 'adapter_metrics_ingested'
   | 'adapter_violation_reported'
-  | 'adapter_telemetry_unsigned'
-  | 'adapter_telemetry_signature_invalid'
   | 'policy_decision_pending'
-  | 'policy_decision_resolved';
+  | 'policy_decision_resolved'
+  | 'approval_auto_allowed_in_core';
 
-/**
- * An entry in the audit log
- */
 export interface AuditEntry {
   id: number;
   tenantId: string;
@@ -65,9 +52,6 @@ export interface AuditEntry {
   createdAt: string;
 }
 
-/**
- * Options for querying the audit log
- */
 export interface AuditQueryOptions {
   tenantId: string;
   workspaceId?: string;
@@ -81,18 +65,12 @@ export interface AuditQueryOptions {
   offset?: number;
 }
 
-/**
- * Result of querying the audit log
- */
 export interface AuditQueryResult {
   entries: AuditEntry[];
   total: number;
   hasMore: boolean;
 }
 
-/**
- * Statistics about audit log entries
- */
 export interface AuditStats {
   totalEntries: number;
   entriesByType: Record<string, number>;
@@ -100,29 +78,7 @@ export interface AuditStats {
   newestEntry?: string;
 }
 
-export interface AuditChainEntry {
-  tenantId: string;
-  seq: number;
-  prevEventHash: string | null;
-  eventHash: string;
-  eventType: AuditEventType;
-  eventData: Record<string, unknown>;
-  createdAt: string;
-}
-
-export interface AuditChainVerification {
-  ok: boolean;
-  failures: string[];
-}
-
-// ============================================================================
-// Audit Log Class
-// ============================================================================
-
 export class AuditLog {
-  /**
-   * Log an event (append-only, no modification allowed)
-   */
   log(
     eventType: AuditEventType,
     data: {
@@ -152,117 +108,46 @@ export class AuditLog {
       createdAt
     );
 
-    this.appendAuditChain({
-      tenantId: data.tenantId,
-      eventType,
-      eventData,
-      createdAt,
-    });
-
     return result.lastInsertRowid as number;
   }
 
-  private appendAuditChain(params: {
-    tenantId: string;
-    eventType: AuditEventType;
-    eventData: Record<string, unknown>;
-    createdAt: string;
-  }): void {
-    const db = getDatabase();
-    const last = db
-      .prepare(
-        `SELECT seq, event_hash FROM audit_chain WHERE tenant_id = ? ORDER BY seq DESC LIMIT 1`
-      )
-      .get(params.tenantId) as { seq: number; event_hash: string } | undefined;
-
-    const seq = last ? last.seq + 1 : 1;
-    const prevHash = last ? last.event_hash : null;
-
-    const hashPayload = stableStringify({
-      tenant_id: params.tenantId,
-      seq,
-      prev_event_hash: prevHash,
-      event_type: params.eventType,
-      event_data: params.eventData as JsonValue,
-      created_at: params.createdAt,
-    });
-    const eventHash = formatSha256(sha256Hex(hashPayload));
-
-    db.prepare(
-      `
-      INSERT INTO audit_chain (
-        tenant_id, seq, prev_event_hash, event_hash, event_type, event_data, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `
-    ).run(
-      params.tenantId,
-      seq,
-      prevHash,
-      eventHash,
-      params.eventType,
-      JSON.stringify(params.eventData),
-      params.createdAt
-    );
-  }
-
-  /**
-   * Query the audit log
-   */
   query(options: AuditQueryOptions): AuditQueryResult {
     const db = getDatabase();
-    const limit = options.limit || 100;
-    const offset = options.offset || 0;
-
-    // Build WHERE clause
     const conditions: string[] = ['tenant_id = ?'];
-    const params: unknown[] = [options.tenantId];
+    const values: unknown[] = [options.tenantId];
 
     if (options.workspaceId) {
       conditions.push('workspace_id = ?');
-      params.push(options.workspaceId);
+      values.push(options.workspaceId);
     }
-
     if (options.traceId) {
       conditions.push('trace_id = ?');
-      params.push(options.traceId);
+      values.push(options.traceId);
     }
-
     if (options.userId) {
-      conditions.push("json_extract(event_data, '$.user_id') = ?");
-      params.push(options.userId);
+      conditions.push('user_id = ?');
+      values.push(options.userId);
     }
-
     if (options.eventType) {
       conditions.push('event_type = ?');
-      params.push(options.eventType);
+      values.push(options.eventType);
+    } else if (options.eventTypes?.length) {
+      conditions.push(`event_type IN (${options.eventTypes.map(() => '?').join(', ')})`);
+      values.push(...options.eventTypes);
     }
-
-    if (options.eventTypes && options.eventTypes.length > 0) {
-      const placeholders = options.eventTypes.map(() => '?').join(', ');
-      conditions.push(`event_type IN (${placeholders})`);
-      params.push(...options.eventTypes);
-    }
-
     if (options.startDate) {
       conditions.push('created_at >= ?');
-      params.push(options.startDate);
+      values.push(options.startDate);
     }
-
     if (options.endDate) {
       conditions.push('created_at <= ?');
-      params.push(options.endDate);
+      values.push(options.endDate);
     }
 
     const whereClause = conditions.join(' AND ');
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
 
-    // Get total count
-    const countRow = db
-      .prepare(`SELECT COUNT(*) as count FROM audit_log WHERE ${whereClause}`)
-      .get(...params) as { count: number };
-
-    const total = countRow.count;
-
-    // Get entries
     const rows = db
       .prepare(
         `
@@ -272,220 +157,130 @@ export class AuditLog {
         LIMIT ? OFFSET ?
       `
       )
-      .all(...params, limit, offset) as AuditRow[];
+      .all(...values, limit, offset) as AuditLogRow[];
 
-    const entries = rows.map((row) => this.rowToEntry(row));
+    const total = db
+      .prepare(`SELECT COUNT(*) as count FROM audit_log WHERE ${whereClause}`)
+      .get(...values) as { count: number };
 
+    const entries = rows.map(rowToEntry);
     return {
       entries,
-      total,
-      hasMore: offset + entries.length < total,
+      total: total.count,
+      hasMore: offset + limit < total.count,
     };
   }
 
-  /**
-   * Get entries for a specific trace
-   */
-  getByTrace(traceId: string): AuditEntry[] {
+  stats(tenantId: string): AuditStats {
     const db = getDatabase();
-
     const rows = db
       .prepare(
         `
-        SELECT * FROM audit_log
-        WHERE trace_id = ?
-        ORDER BY created_at ASC
+        SELECT event_type as eventType, COUNT(*) as count
+        FROM audit_log
+        WHERE tenant_id = ?
+        GROUP BY event_type
       `
       )
-      .all(traceId) as AuditRow[];
+      .all(tenantId) as { eventType: string; count: number }[];
 
-    return rows.map((row) => this.rowToEntry(row));
+    const totalRow = db
+      .prepare(`SELECT COUNT(*) as count FROM audit_log WHERE tenant_id = ?`)
+      .get(tenantId) as { count: number };
+
+    const oldest = db
+      .prepare(`SELECT created_at as createdAt FROM audit_log WHERE tenant_id = ? ORDER BY created_at ASC LIMIT 1`)
+      .get(tenantId) as { createdAt?: string } | undefined;
+
+    const newest = db
+      .prepare(`SELECT created_at as createdAt FROM audit_log WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .get(tenantId) as { createdAt?: string } | undefined;
+
+    return {
+      totalEntries: totalRow.count,
+      entriesByType: rows.reduce<Record<string, number>>((acc, row) => {
+        acc[row.eventType] = row.count;
+        return acc;
+      }, {}),
+      oldestEntry: oldest?.createdAt,
+      newestEntry: newest?.createdAt,
+    };
   }
 
-  /**
-   * Get statistics for a tenant
-   */
   getStats(tenantId: string, startDate?: string, endDate?: string): AuditStats {
     const db = getDatabase();
-
     const conditions: string[] = ['tenant_id = ?'];
-    const params: unknown[] = [tenantId];
-
+    const values: unknown[] = [tenantId];
     if (startDate) {
       conditions.push('created_at >= ?');
-      params.push(startDate);
+      values.push(startDate);
     }
-
     if (endDate) {
       conditions.push('created_at <= ?');
-      params.push(endDate);
+      values.push(endDate);
     }
-
     const whereClause = conditions.join(' AND ');
-
-    // Get total count
-    const countRow = db
-      .prepare(`SELECT COUNT(*) as count FROM audit_log WHERE ${whereClause}`)
-      .get(...params) as { count: number };
-
-    // Get counts by type
-    const typeRows = db
+    const rows = db
       .prepare(
         `
-        SELECT event_type, COUNT(*) as count
+        SELECT event_type as eventType, COUNT(*) as count
         FROM audit_log
         WHERE ${whereClause}
         GROUP BY event_type
       `
       )
-      .all(...params) as { event_type: string; count: number }[];
+      .all(...values) as { eventType: string; count: number }[];
 
-    const entriesByType: Record<string, number> = {};
-    for (const row of typeRows) {
-      entriesByType[row.event_type] = row.count;
-    }
+    const totalRow = db
+      .prepare(`SELECT COUNT(*) as count FROM audit_log WHERE ${whereClause}`)
+      .get(...values) as { count: number };
 
-    // Get date range
-    const rangeRow = db
-      .prepare(
-        `
-        SELECT MIN(created_at) as oldest, MAX(created_at) as newest
-        FROM audit_log
-        WHERE ${whereClause}
-      `
-      )
-      .get(...params) as { oldest: string | null; newest: string | null };
+    const oldest = db
+      .prepare(`SELECT created_at as createdAt FROM audit_log WHERE ${whereClause} ORDER BY created_at ASC LIMIT 1`)
+      .get(...values) as { createdAt?: string } | undefined;
+
+    const newest = db
+      .prepare(`SELECT created_at as createdAt FROM audit_log WHERE ${whereClause} ORDER BY created_at DESC LIMIT 1`)
+      .get(...values) as { createdAt?: string } | undefined;
 
     return {
-      totalEntries: countRow.count,
-      entriesByType,
-      oldestEntry: rangeRow.oldest || undefined,
-      newestEntry: rangeRow.newest || undefined,
-    };
-  }
-
-  getAuditChain(tenantId: string): AuditChainEntry[] {
-    const db = getDatabase();
-    const rows = db
-      .prepare(
-        `
-        SELECT * FROM audit_chain
-        WHERE tenant_id = ?
-        ORDER BY seq ASC
-      `
-      )
-      .all(tenantId) as AuditChainRow[];
-
-    return rows.map((row) => ({
-      tenantId: row.tenant_id,
-      seq: row.seq,
-      prevEventHash: row.prev_event_hash,
-      eventHash: row.event_hash,
-      eventType: row.event_type as AuditEventType,
-      eventData: JSON.parse(row.event_data),
-      createdAt: row.created_at,
-    }));
-  }
-
-  verifyAuditChain(tenantId: string): AuditChainVerification {
-    const entries = this.getAuditChain(tenantId);
-    const failures: string[] = [];
-
-    let prevHash: string | null = null;
-    for (const entry of entries) {
-      if (entry.prevEventHash !== prevHash) {
-        failures.push(`seq_${entry.seq}_prev_hash_mismatch`);
-      }
-
-      const hashPayload = stableStringify({
-        tenant_id: entry.tenantId,
-        seq: entry.seq,
-        prev_event_hash: entry.prevEventHash,
-        event_type: entry.eventType,
-        event_data: entry.eventData as JsonValue,
-        created_at: entry.createdAt,
-      });
-      const expectedHash = formatSha256(sha256Hex(hashPayload));
-
-      if (expectedHash !== entry.eventHash) {
-        failures.push(`seq_${entry.seq}_hash_mismatch`);
-      }
-
-      prevHash = entry.eventHash;
-    }
-
-    return { ok: failures.length === 0, failures };
-  }
-
-  /**
-   * Purge old entries (for maintenance, use with caution)
-   * Note: This is the only way to remove entries, and should only be
-   * used for compliance-approved retention policies.
-   */
-  purgeOlderThan(date: string, tenantId?: string): number {
-    const db = getDatabase();
-
-    let stmt;
-    if (tenantId) {
-      stmt = db.prepare(
-        'DELETE FROM audit_log WHERE created_at < ? AND tenant_id = ?'
-      );
-      return stmt.run(date, tenantId).changes;
-    } else {
-      stmt = db.prepare('DELETE FROM audit_log WHERE created_at < ?');
-      return stmt.run(date).changes;
-    }
-  }
-
-  /**
-   * Convert database row to AuditEntry
-   */
-  private rowToEntry(row: AuditRow): AuditEntry {
-    return {
-      id: row.id,
-      tenantId: row.tenant_id,
-      workspaceId: row.workspace_id || undefined,
-      traceId: row.trace_id || undefined,
-      eventType: row.event_type as AuditEventType,
-      eventData: JSON.parse(row.event_data),
-      createdAt: row.created_at,
+      totalEntries: totalRow.count,
+      entriesByType: rows.reduce<Record<string, number>>((acc, row) => {
+        acc[row.eventType] = row.count;
+        return acc;
+      }, {}),
+      oldestEntry: oldest?.createdAt,
+      newestEntry: newest?.createdAt,
     };
   }
 }
 
-// ============================================================================
-// Database Row Type
-// ============================================================================
-
-interface AuditRow {
+interface AuditLogRow {
   id: number;
   tenant_id: string;
   workspace_id: string | null;
   trace_id: string | null;
-  event_type: string;
+  user_id: string | null;
+  event_type: AuditEventType;
   event_data: string;
   created_at: string;
 }
 
-interface AuditChainRow {
-  tenant_id: string;
-  seq: number;
-  prev_event_hash: string | null;
-  event_hash: string;
-  event_type: string;
-  event_data: string;
-  created_at: string;
+function rowToEntry(row: AuditLogRow): AuditEntry {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    workspaceId: row.workspace_id || undefined,
+    traceId: row.trace_id || undefined,
+    userId: row.user_id || undefined,
+    eventType: row.event_type,
+    eventData: row.event_data ? JSON.parse(row.event_data) : {},
+    createdAt: row.created_at,
+  };
 }
-
-// ============================================================================
-// Singleton Instance
-// ============================================================================
 
 let auditLogInstance: AuditLog | null = null;
 
-/**
- * Get or create the AuditLog instance
- */
 export function getAuditLog(): AuditLog {
   if (!auditLogInstance) {
     auditLogInstance = new AuditLog();
@@ -493,20 +288,6 @@ export function getAuditLog(): AuditLog {
   return auditLogInstance;
 }
 
-/**
- * Reset the audit log instance (for testing)
- */
-export function resetAuditLog(): void {
-  auditLogInstance = null;
-}
-
-// ============================================================================
-// Convenience Functions
-// ============================================================================
-
-/**
- * Quick log function for common events
- */
 export function auditLog(
   eventType: AuditEventType,
   data: {
@@ -516,143 +297,46 @@ export function auditLog(
     userId?: string;
     eventData?: Record<string, unknown>;
   }
-): void {
-  getAuditLog().log(eventType, data);
+): number {
+  return getAuditLog().log(eventType, data);
 }
 
-/**
- * Log an agent execution start
- */
-export function logAgentStart(
-  tenantId: string,
-  traceId: string,
-  data: {
-    workspaceId?: string;
-    userId?: string;
-    model?: string;
-    agentRole?: string;
-  }
-): void {
-  auditLog('agent_execution_started', {
-    tenantId,
-    traceId,
-    workspaceId: data.workspaceId,
+export function logOverrideUsed(params: {
+  tenantId: string;
+  workspaceId?: string;
+  traceId?: string;
+  userId?: string;
+  reasonCode: string;
+  justification?: string;
+}): number {
+  return auditLog('ops_override_used', {
+    tenantId: params.tenantId,
+    workspaceId: params.workspaceId,
+    traceId: params.traceId,
+    userId: params.userId,
     eventData: {
-      user_id: data.userId,
-      model: data.model,
-      agent_role: data.agentRole,
+      reason_code: params.reasonCode,
+      justification: params.justification || null,
     },
   });
 }
 
 /**
- * Log an agent execution completion
+ * Log when Core (OSS) auto-allows an execution that would otherwise require approval.
+ * Used when CLASPER_REQUIRE_APPROVAL_IN_CORE=allow (default) so the agent is not stuck with no way to approve.
  */
-export function logAgentComplete(
-  tenantId: string,
-  traceId: string,
-  data: {
-    workspaceId?: string;
-    durationMs?: number;
-    inputTokens?: number;
-    outputTokens?: number;
-    cost?: number;
-    toolCallCount?: number;
-  }
-): void {
-  auditLog('agent_execution_completed', {
-    tenantId,
-    traceId,
-    workspaceId: data.workspaceId,
+export function logApprovalAutoAllowedInCore(params: {
+  tenantId: string;
+  workspaceId?: string;
+  executionId: string;
+  reason: 'policy_requires_approval' | 'risk_requires_approval';
+}): number {
+  return auditLog('approval_auto_allowed_in_core', {
+    tenantId: params.tenantId,
+    workspaceId: params.workspaceId,
     eventData: {
-      duration_ms: data.durationMs,
-      input_tokens: data.inputTokens,
-      output_tokens: data.outputTokens,
-      cost: data.cost,
-      tool_call_count: data.toolCallCount,
-    },
-  });
-}
-
-/**
- * Log a tool call
- */
-export function logToolCall(
-  tenantId: string,
-  traceId: string,
-  data: {
-    workspaceId?: string;
-    toolName: string;
-    success: boolean;
-    durationMs?: number;
-    error?: string;
-  }
-): void {
-  const eventType = data.success ? 'tool_call_succeeded' : 'tool_call_failed';
-  auditLog(eventType, {
-    tenantId,
-    traceId,
-    workspaceId: data.workspaceId,
-    eventData: {
-      tool_name: data.toolName,
-      duration_ms: data.durationMs,
-      error: data.error,
-    },
-  });
-}
-
-/**
- * Log a permission denial
- */
-export function logPermissionDenied(
-  tenantId: string,
-  traceId: string,
-  data: {
-    workspaceId?: string;
-    toolName: string;
-    reason: string;
-    skillName?: string;
-  }
-): void {
-  auditLog('tool_permission_denied', {
-    tenantId,
-    traceId,
-    workspaceId: data.workspaceId,
-    eventData: {
-      tool_name: data.toolName,
-      reason: data.reason,
-      skill_name: data.skillName,
-    },
-  });
-}
-
-/**
- * Log a break-glass override usage.
- * Captures actor, role, action, and structured justification.
- */
-export function logOverrideUsed(
-  tenantId: string,
-  data: {
-    workspaceId?: string;
-    actor: string;
-    role: string;
-    action: string;
-    targetId: string;
-    reasonCode: string;
-    justification: string;
-  }
-): void {
-  auditLog('ops_override_used', {
-    tenantId,
-    workspaceId: data.workspaceId,
-    eventData: {
-      actor: data.actor,
-      role: data.role,
-      action: data.action,
-      target_id: data.targetId,
-      reason_code: data.reasonCode,
-      justification: data.justification,
-      timestamp: new Date().toISOString(),
+      execution_id: params.executionId,
+      reason: params.reason,
     },
   });
 }

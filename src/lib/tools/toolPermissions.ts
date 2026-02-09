@@ -9,7 +9,6 @@
  */
 
 import { SkillManifest } from '../skills/skillManifest.js';
-import { TenantContext, canUseTool } from '../auth/tenantContext.js';
 import { ToolProxy, ToolCall, ToolResult, ToolContext } from './toolProxy.js';
 
 // ============================================================================
@@ -122,40 +121,14 @@ export class ToolPermissionChecker {
   }
 
   /**
-   * Check if a tool call is allowed by tenant permissions
+   * Full permission check: skill-only (single-tenant OSS)
    */
-  checkTenantPermission(toolName: string, tenant: TenantContext): PermissionResult {
-    if (!canUseTool(tenant, toolName)) {
-      return {
-        allowed: false,
-        reason: 'not_in_tenant_permissions',
-        details: `Tenant ${tenant.tenantId} does not have permission to use tool: ${toolName}`,
-      };
-    }
-
-    return { allowed: true };
-  }
-
-  /**
-   * Full permission check: skill + tenant
-   */
-  checkPermission(
-    toolName: string,
-    tenant: TenantContext,
-    skill?: SkillManifest
-  ): PermissionResult {
+  checkPermission(toolName: string, skill?: SkillManifest): PermissionResult {
     // First, check skill permissions (fast, local)
     const skillCheck = this.checkSkillPermission(toolName, skill);
     if (!skillCheck.allowed) {
       return skillCheck;
     }
-
-    // Then, check tenant permissions
-    const tenantCheck = this.checkTenantPermission(toolName, tenant);
-    if (!tenantCheck.allowed) {
-      return tenantCheck;
-    }
-
     return { allowed: true };
   }
 
@@ -166,7 +139,9 @@ export class ToolPermissionChecker {
   async validateAndProxy(
     call: ToolCall,
     context: {
-      tenant: TenantContext;
+      tenantId: string;
+      workspaceId: string;
+      userId: string;
       traceId: string;
       agentToken: string;
       skill?: SkillManifest;
@@ -175,11 +150,7 @@ export class ToolPermissionChecker {
     const start = Date.now();
 
     // Check permissions first
-    const permission = this.checkPermission(
-      call.name,
-      context.tenant,
-      context.skill
-    );
+    const permission = this.checkPermission(call.name, context.skill);
 
     if (!permission.allowed) {
       const durationMs = Date.now() - start;
@@ -188,7 +159,7 @@ export class ToolPermissionChecker {
       this.logPermissionEvent({
         timestamp: new Date().toISOString(),
         traceId: context.traceId,
-        tenantId: context.tenant.tenantId,
+      tenantId: context.tenantId,
         toolName: call.name,
         allowed: false,
         reason: permission.reason,
@@ -207,11 +178,11 @@ export class ToolPermissionChecker {
 
     // Proxy to backend
     const toolContext: ToolContext = {
-      tenantId: context.tenant.tenantId,
-      workspaceId: context.tenant.workspaceId,
+      tenantId: context.tenantId,
+      workspaceId: context.workspaceId,
       traceId: context.traceId,
       agentToken: context.agentToken,
-      userId: context.tenant.userId,
+      userId: context.userId,
     };
 
     const result = await this.toolProxy.execute(call, toolContext);
@@ -220,7 +191,7 @@ export class ToolPermissionChecker {
     this.logPermissionEvent({
       timestamp: new Date().toISOString(),
       traceId: context.traceId,
-      tenantId: context.tenant.tenantId,
+      tenantId: context.tenantId,
       toolName: call.name,
       allowed: true,
       skillName: context.skill?.name,
@@ -237,7 +208,9 @@ export class ToolPermissionChecker {
   async validateAndProxyMany(
     calls: ToolCall[],
     context: {
-      tenant: TenantContext;
+      tenantId: string;
+      workspaceId: string;
+      userId: string;
       traceId: string;
       agentToken: string;
       skill?: SkillManifest;
@@ -254,13 +227,12 @@ export class ToolPermissionChecker {
    */
   preValidate(
     toolNames: string[],
-    tenant: TenantContext,
     skill?: SkillManifest
   ): Map<string, PermissionResult> {
     const results = new Map<string, PermissionResult>();
 
     for (const toolName of toolNames) {
-      results.set(toolName, this.checkPermission(toolName, tenant, skill));
+      results.set(toolName, this.checkPermission(toolName, skill));
     }
 
     return results;
@@ -271,11 +243,10 @@ export class ToolPermissionChecker {
    */
   getAllowedTools(
     availableTools: string[],
-    tenant: TenantContext,
     skill?: SkillManifest
   ): string[] {
     return availableTools.filter((toolName) => {
-      const result = this.checkPermission(toolName, tenant, skill);
+      const result = this.checkPermission(toolName, skill);
       return result.allowed;
     });
   }

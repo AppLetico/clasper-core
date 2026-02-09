@@ -5,7 +5,7 @@
  * - core: Database, config
  * - tracing: Trace model and storage
  * - skills: Skill manifest, registry, testing
- * - auth: Authentication and tenant context
+ * - auth: Authentication and local ops context
  * - tools: Tool proxy and permissions
  * - governance: Audit, redaction, budgets
  * - providers: LLM providers and contracts

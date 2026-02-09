@@ -1,8 +1,10 @@
 import { calculateRiskScore } from "../governance/riskScoring.js";
+import { getAdapterRegistry } from "../adapters/registry.js";
 import { getSkillRegistry, type SkillState } from "../skills/skillRegistry.js";
 import type { AgentTrace, TraceStep } from "../tracing/trace.js";
 import type { OpsRole } from "../auth/opsAuth.js";
 import { config } from "../core/config.js";
+import type { GovernanceView } from "./governanceViews.js";
 
 /**
  * Role hierarchy rank for comparison
@@ -40,6 +42,7 @@ export interface TraceSummaryView {
   model: string;
   provider: string;
   cost: number;
+  story_summary: string;
   tokens: {
     input: number;
     output: number;
@@ -57,6 +60,10 @@ export interface TraceSummaryView {
     failures: string[];
   };
   trust_status: string;
+  requested_capabilities: string[];
+  tool_count: number;
+  tool_names: string[];
+  governance?: GovernanceView;
 }
 
 /**
@@ -190,13 +197,25 @@ function pickSkillStateForRisk(skillStates: Record<string, string>): string | un
 export function computeTraceRisk(trace: AgentTrace, skillStates?: Record<string, string>) {
   const states = skillStates || getSkillStates(trace.skillVersions);
   const toolNames = getToolNames(trace.steps);
+  const requestedCapabilities = trace.granted_scope?.capabilities;
+  const adapterRiskClass = trace.adapter_id
+    ? (getAdapterRegistry().get(trace.tenantId, trace.adapter_id)?.risk_class as any)
+    : undefined;
+
+  const context =
+    requestedCapabilities?.includes("external_network")
+      ? { external_network: true }
+      : undefined;
+
   const score = calculateRiskScore({
     toolCount: toolNames.length,
     toolNames,
     skillState: pickSkillStateForRisk(states) as SkillState | undefined,
     model: trace.model,
     dataSensitivity: "none",
-    requestedCapabilities: trace.granted_scope?.capabilities
+    adapterRiskClass,
+    requestedCapabilities,
+    context
   });
 
   return {
@@ -216,14 +235,71 @@ function buildAnnotationsMap(entries: { key: string; value: string }[]): Record<
   return map;
 }
 
+function shortList(items: string[], max: number): string {
+  const shown = items.slice(0, max);
+  const more = items.length > max ? ` +${items.length - max}` : "";
+  return `${shown.join(", ")}${more}`;
+}
+
+function buildStorySummary(params: {
+  trace: AgentTrace;
+  environment: string;
+  annotations: Record<string, string>;
+  requestedCapabilities: string[];
+  toolNames: string[];
+  governance?: GovernanceView;
+}) {
+  const scenario = (params.trace.labels || {}).scenario || params.annotations.scenario || "trace";
+  const ticket = params.annotations.ticket;
+  const repo = params.annotations.repo;
+  const service = params.annotations.service;
+  const version = params.annotations.version;
+  const intent = (params.trace.labels || {}).intent || params.annotations.intent;
+
+  // Primary story line: What was the agent trying to do?
+  // Prefer human-readable intent if available, otherwise construct from scenario
+  let title = intent || scenario;
+  if (!intent) {
+    if (scenario === "incident_triage") {
+      title = `Triage ${ticket || "incident"}`;
+      if (repo) title += ` (${repo})`;
+    } else if (scenario === "deploy") {
+      title = `Deploy ${service || "service"}${version ? ` ${version}` : ""}`;
+    } else if (scenario === "config_change") {
+      title = `Config change ${service || "service"}`;
+    } else if (scenario === "data_access") {
+      title = "Access sensitive data";
+    } else {
+      title = scenario.replace(/_/g, " ");
+      // Capitalize first letter
+      title = title.charAt(0).toUpperCase() + title.slice(1);
+    }
+  }
+
+  return title;
+}
+
 export function buildTraceSummaryView(params: {
   trace: AgentTrace;
   annotations: { key: string; value: string }[];
+  governance?: GovernanceView;
 }): TraceSummaryView {
-  const { trace, annotations } = params;
+  const { trace, annotations, governance } = params;
   const skillStates = getSkillStates(trace.skillVersions);
   const risk = computeTraceRisk(trace, skillStates);
   const labels = trace.labels || {};
+  const toolNames = getToolNames(trace.steps);
+  const requestedCapabilities = trace.granted_scope?.capabilities || [];
+  const annotationsMap = buildAnnotationsMap(annotations);
+  const environment = deriveEnvironment(trace);
+  const storySummary = buildStorySummary({
+    trace,
+    environment,
+    annotations: annotationsMap,
+    requestedCapabilities,
+    toolNames,
+    governance
+  });
 
   return {
     id: trace.id,
@@ -231,7 +307,7 @@ export function buildTraceSummaryView(params: {
     workspace_id: trace.workspaceId,
     agent_role: trace.agentRole,
     adapter_id: trace.adapter_id,
-    environment: deriveEnvironment(trace),
+    environment,
     started_at: trace.startedAt,
     completed_at: trace.completedAt,
     duration_ms: trace.durationMs,
@@ -239,6 +315,7 @@ export function buildTraceSummaryView(params: {
     model: trace.model,
     provider: trace.provider,
     cost: trace.usage.totalCost,
+    story_summary: storySummary,
     tokens: {
       input: trace.usage.inputTokens,
       output: trace.usage.outputTokens
@@ -246,12 +323,16 @@ export function buildTraceSummaryView(params: {
     risk,
     deprecated_skill_used: hasDeprecatedSkill(skillStates),
     labels,
-    annotations: buildAnnotationsMap(annotations),
+    annotations: annotationsMap,
     integrity: {
       status: trace.integrity_status || "unverified",
       failures: trace.integrity_failures || []
     },
-    trust_status: trace.trust_status || "unverified"
+    trust_status: trace.trust_status || "unverified",
+    requested_capabilities: requestedCapabilities,
+    tool_count: toolNames.length,
+    tool_names: toolNames,
+    governance
   };
 }
 
@@ -310,13 +391,18 @@ export function buildTraceDetailView(params: {
   trace: AgentTrace;
   annotations: { key: string; value: string }[];
   role?: OpsRole;
+  governance?: GovernanceView;
 }): TraceDetailView {
-  const { trace, annotations, role = "viewer" } = params;
+  // In OSS Core, Ops Console is single-tenant and the local operator is the admin boundary.
+  // Default role to "operator" so detail views are useful out of the box.
+  const { trace, annotations, role = "operator", governance } = params;
   const skillStates = getSkillStates(trace.skillVersions);
-  const summary = buildTraceSummaryView({ trace, annotations });
+  const summary = buildTraceSummaryView({ trace, annotations, governance });
 
-  // Role-based field stripping: only admin can see raw sensitive content
-  const isAdmin = roleAtLeast(role, "admin");
+  // Role-based stripping (kept for forward-compat with Cloud multi-role setups).
+  // For local Core, allow operators to see full trace detail.
+  const canSeeSensitive = roleAtLeast(role, "operator");
+  const canSeeRaw = roleAtLeast(role, "admin");
 
   // Get redaction info
   const redactionInfo: RedactionInfo = {
@@ -350,18 +436,18 @@ export function buildTraceDetailView(params: {
     }
   };
 
-  // Strip sensitive data for non-admin users
-  const inputMessage = isAdmin ? trace.input.message : SENSITIVE_CONTENT_PLACEHOLDER;
-  const outputMessage = isAdmin
+  // Strip sensitive data for non-privileged users
+  const inputMessage = canSeeSensitive ? trace.input.message : SENSITIVE_CONTENT_PLACEHOLDER;
+  const outputMessage = canSeeSensitive
     ? trace.output?.message
     : trace.output ? SENSITIVE_CONTENT_PLACEHOLDER : undefined;
 
-  // Strip step data for non-admin
+  // Strip step data for non-privileged users
   const steps = trace.steps.map((step) => ({
     type: step.type,
     timestamp: step.timestamp,
     duration_ms: step.durationMs,
-    data: isAdmin ? step.data : { type: step.type, withheld: true }
+    data: canSeeSensitive ? step.data : { type: step.type, withheld: true }
   }));
 
   return {
@@ -394,6 +480,6 @@ export function buildTraceDetailView(params: {
     granted_scope: trace.granted_scope,
     used_scope: trace.used_scope,
     violations: trace.violations,
-    raw_trace: isAdmin ? trace : null
+    raw_trace: canSeeRaw ? trace : null
   };
 }

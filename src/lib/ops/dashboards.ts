@@ -52,6 +52,7 @@ export interface CostDashboardOptions {
   dailyLimit?: number;
   workspaceLimit?: number;
   skillLimit?: number;
+  workspaceId?: string;
 }
 
 export function getCostDashboard(tenantId: string, options: CostDashboardOptions = {}) {
@@ -67,33 +68,39 @@ export function getCostDashboard(tenantId: string, options: CostDashboardOptions
            SUM(total_cost) as total_cost,
            COUNT(*) as trace_count
     FROM traces
-    WHERE tenant_id = ?
+    WHERE tenant_id = ?${options.workspaceId ? " AND workspace_id = ?" : ""}
     GROUP BY day
     ORDER BY day DESC
     LIMIT ?
-  `).all(tenantId, dailyLimit) as { day: string; total_cost: number; trace_count: number }[];
+  `).all(
+    options.workspaceId ? [tenantId, options.workspaceId, dailyLimit] : [tenantId, dailyLimit]
+  ) as { day: string; total_cost: number; trace_count: number }[];
 
   const byWorkspace = db.prepare(`
     SELECT workspace_id,
            SUM(total_cost) as total_cost,
            COUNT(*) as trace_count
     FROM traces
-    WHERE tenant_id = ?
+    WHERE tenant_id = ?${options.workspaceId ? " AND workspace_id = ?" : ""}
     GROUP BY workspace_id
     ORDER BY total_cost DESC
     LIMIT ?
-  `).all(tenantId, workspaceLimit) as { workspace_id: string; total_cost: number; trace_count: number }[];
+  `).all(
+    options.workspaceId ? [tenantId, options.workspaceId, workspaceLimit] : [tenantId, workspaceLimit]
+  ) as { workspace_id: string; total_cost: number; trace_count: number }[];
 
   const bySkill = db.prepare(`
     SELECT json_each.key as skill_name,
            SUM(total_cost) as total_cost,
            COUNT(*) as trace_count
     FROM traces, json_each(traces.skill_versions)
-    WHERE tenant_id = ?
+    WHERE tenant_id = ?${options.workspaceId ? " AND workspace_id = ?" : ""}
     GROUP BY json_each.key
     ORDER BY total_cost DESC
     LIMIT ?
-  `).all(tenantId, skillLimit) as { skill_name: string; total_cost: number; trace_count: number }[];
+  `).all(
+    options.workspaceId ? [tenantId, options.workspaceId, skillLimit] : [tenantId, skillLimit]
+  ) as { skill_name: string; total_cost: number; trace_count: number }[];
 
   return {
     daily,

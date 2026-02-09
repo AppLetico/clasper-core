@@ -16,9 +16,6 @@ export interface DecisionRecord {
   granted_scope?: Record<string, unknown> | null;
   resolution?: Record<string, unknown> | null;
   callback_url?: string | null;
-  decision_token?: string | null;
-  decision_token_jti?: string | null;
-  decision_token_used_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -106,12 +103,37 @@ export function listPendingDecisions(params: {
   return rows.map(rowToRecord);
 }
 
+/**
+ * Get the most recent decision for a specific execution (used for adapter retry/resume).
+ */
+export function getLatestDecisionForExecution(params: {
+  tenantId: string;
+  workspaceId: string;
+  adapterId: string;
+  executionId: string;
+}): DecisionRecord | null {
+  const db = getDatabase();
+  const row = db
+    .prepare(
+      `
+      SELECT * FROM decisions
+      WHERE tenant_id = ?
+        AND workspace_id = ?
+        AND adapter_id = ?
+        AND execution_id = ?
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `
+    )
+    .get(params.tenantId, params.workspaceId, params.adapterId, params.executionId) as DecisionRow | undefined;
+
+  return row ? rowToRecord(row) : null;
+}
+
 export function resolveDecision(params: {
   decisionId: string;
   status: DecisionStatus;
   resolution: Record<string, unknown>;
-  decisionToken?: string;
-  decisionTokenJti?: string;
 }): DecisionRecord | null {
   const db = getDatabase();
   const now = new Date().toISOString();
@@ -119,40 +141,19 @@ export function resolveDecision(params: {
     .prepare(
       `
       UPDATE decisions
-      SET status = ?, resolution = ?, decision_token = ?, decision_token_jti = ?, updated_at = ?
+      SET status = ?, resolution = ?, updated_at = ?
       WHERE decision_id = ?
     `
     )
     .run(
       params.status,
       JSON.stringify(params.resolution),
-      params.decisionToken || null,
-      params.decisionTokenJti || null,
       now,
       params.decisionId
     );
 
   if (result.changes === 0) return null;
   return getDecision(params.decisionId);
-}
-
-export function markDecisionTokenUsed(params: {
-  decisionId: string;
-  decisionTokenJti: string;
-}): boolean {
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  const result = db
-    .prepare(
-      `
-      UPDATE decisions
-      SET decision_token_used_at = ?, updated_at = ?
-      WHERE decision_id = ? AND decision_token_jti = ? AND decision_token_used_at IS NULL
-    `
-    )
-    .run(now, now, params.decisionId, params.decisionTokenJti);
-
-  return result.changes > 0;
 }
 
 interface DecisionRow {
@@ -168,9 +169,6 @@ interface DecisionRow {
   granted_scope: string | null;
   resolution: string | null;
   callback_url: string | null;
-  decision_token: string | null;
-  decision_token_jti: string | null;
-  decision_token_used_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -189,9 +187,6 @@ function rowToRecord(row: DecisionRow): DecisionRecord {
     granted_scope: row.granted_scope ? JSON.parse(row.granted_scope) : null,
     resolution: row.resolution ? JSON.parse(row.resolution) : null,
     callback_url: row.callback_url,
-    decision_token: row.decision_token,
-    decision_token_jti: row.decision_token_jti,
-    decision_token_used_at: row.decision_token_used_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

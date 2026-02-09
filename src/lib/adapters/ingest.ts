@@ -4,8 +4,6 @@ import { AgentTraceSchema } from '../tracing/trace.js';
 import { getTraceStore } from '../tracing/traceStore.js';
 import { verifyTraceIntegrity } from '../tracing/traceIntegrity.js';
 import { resolveTrustStatus } from '../tracing/trustStatus.js';
-import { consumeToolToken } from '../governance/toolTokens.js';
-import { config } from '../core/config.js';
 import { auditLog } from '../governance/auditLog.js';
 import { getBudgetManager } from '../governance/budgetManager.js';
 import {
@@ -42,34 +40,13 @@ export function ingestTrace(payload: unknown): IngestResult {
   }
 
   trace.adapter_id = parsed.adapter_id;
-  const toolAuthMode = config.toolAuthorizationMode as
-    | 'off'
-    | 'warn'
-    | 'enforce';
+  // Persist execution_id for governance joins (no schema migration).
+  // This is the adapter contract execution identifier carried by the telemetry envelope.
+  trace.labels = {
+    ...(trace.labels || {}),
+    execution_id: parsed.execution_id,
+  };
   const violations = trace.violations || [];
-
-  if (toolAuthMode !== 'off') {
-    for (const step of trace.steps) {
-      if (step.type !== 'tool_call') continue;
-      const data = step.data as { tool_token_jti?: string };
-      if (data.tool_token_jti) {
-        const consumed = consumeToolToken(data.tool_token_jti);
-        if (!consumed) {
-          violations.push({
-            type: 'tool_token_invalid_or_reused',
-            message: `Token ${data.tool_token_jti} invalid or already used`,
-            timestamp: new Date().toISOString(),
-          });
-        }
-      } else if (toolAuthMode === 'enforce') {
-        violations.push({
-          type: 'tool_token_missing',
-          message: 'Missing tool authorization token',
-          timestamp: new Date().toISOString(),
-        });
-      }
-    }
-  }
 
   if (violations.length > 0) {
     trace.violations = violations;

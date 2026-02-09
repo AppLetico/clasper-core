@@ -26,6 +26,12 @@ export interface TraceListOptions {
   labelValue?: string;
 }
 
+/** For date-only YYYY-MM-DD, return end-of-day so started_at <= endDate includes the whole day. */
+function endOfDay(dateStr: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return `${dateStr}T23:59:59.999Z`;
+  return dateStr;
+}
+
 export interface TraceListResult {
   traces: AgentTrace[];
   total: number;
@@ -168,7 +174,7 @@ export class TraceStore {
 
     if (options.endDate) {
       conditions.push('started_at <= ?');
-      params.push(options.endDate);
+      params.push(endOfDay(options.endDate));
     }
 
     const whereClause = conditions.join(' AND ');
@@ -271,7 +277,7 @@ export class TraceStore {
 
     if (endDate) {
       conditions.push('started_at <= ?');
-      params.push(endDate);
+      params.push(endOfDay(endDate));
     }
 
     const whereClause = conditions.join(' AND ');

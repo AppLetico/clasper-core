@@ -189,11 +189,6 @@ export function initDatabase(): void {
       risk_class TEXT NOT NULL,
       capabilities JSON NOT NULL,
       enabled INTEGER DEFAULT 1,
-      telemetry_key_alg TEXT,
-      telemetry_public_jwk JSON,
-      telemetry_key_id TEXT,
-      telemetry_key_created_at TEXT,
-      telemetry_key_revoked_at TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now')),
       PRIMARY KEY (tenant_id, adapter_id, version)
@@ -203,24 +198,6 @@ export function initDatabase(): void {
       ON adapter_registry(tenant_id, adapter_id, updated_at DESC);
   `);
 
-  // Tool authorization tokens (single-use)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS tool_tokens (
-      jti TEXT PRIMARY KEY,
-      tenant_id TEXT NOT NULL,
-      adapter_id TEXT NOT NULL,
-      execution_id TEXT NOT NULL,
-      tool TEXT NOT NULL,
-      scope_hash TEXT NOT NULL,
-      issued_at TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
-      used_at TEXT,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_tool_tokens_tenant
-      ON tool_tokens(tenant_id, created_at DESC);
-  `);
 
   // Tool authorization decisions
   db.exec(`
@@ -276,9 +253,6 @@ export function initDatabase(): void {
       granted_scope JSON,
       resolution JSON,
       callback_url TEXT,
-      decision_token TEXT,
-      decision_token_jti TEXT,
-      decision_token_used_at TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -394,7 +368,6 @@ export function initDatabase(): void {
   runTraceLinkingMigration();
   runV121IndexMigration();
   runAdapterTraceColumnsMigration();
-  runAdapterKeyColumnsMigration();
   runTraceIntegrityColumnsMigration();
   runTrustStatusColumnMigration();
 }
@@ -565,38 +538,6 @@ function runAdapterTraceColumnsMigration(): void {
 
   if (!hasAdapterId) {
     database.exec(`CREATE INDEX IF NOT EXISTS idx_traces_adapter ON traces(adapter_id);`);
-  }
-}
-
-/**
- * Migration to add adapter telemetry key columns.
- */
-function runAdapterKeyColumnsMigration(): void {
-  const database = getDatabase();
-  const columns = database
-    .prepare("PRAGMA table_info(adapter_registry)")
-    .all() as { name: string }[];
-
-  const hasKeyAlg = columns.some((c) => c.name === 'telemetry_key_alg');
-  const hasPublicJwk = columns.some((c) => c.name === 'telemetry_public_jwk');
-  const hasKeyId = columns.some((c) => c.name === 'telemetry_key_id');
-  const hasKeyCreatedAt = columns.some((c) => c.name === 'telemetry_key_created_at');
-  const hasKeyRevokedAt = columns.some((c) => c.name === 'telemetry_key_revoked_at');
-
-  if (!hasKeyAlg) {
-    database.exec(`ALTER TABLE adapter_registry ADD COLUMN telemetry_key_alg TEXT;`);
-  }
-  if (!hasPublicJwk) {
-    database.exec(`ALTER TABLE adapter_registry ADD COLUMN telemetry_public_jwk JSON;`);
-  }
-  if (!hasKeyId) {
-    database.exec(`ALTER TABLE adapter_registry ADD COLUMN telemetry_key_id TEXT;`);
-  }
-  if (!hasKeyCreatedAt) {
-    database.exec(`ALTER TABLE adapter_registry ADD COLUMN telemetry_key_created_at TEXT;`);
-  }
-  if (!hasKeyRevokedAt) {
-    database.exec(`ALTER TABLE adapter_registry ADD COLUMN telemetry_key_revoked_at TEXT;`);
   }
 }
 

@@ -86,6 +86,8 @@ export interface ExecutionDecision {
     explanation?: string;
   }[];
   explanation?: string;
+  /** Set when Core (OSS) auto-allowed an execution that would otherwise require approval (no approval UI in OSS). */
+  auto_allowed_in_core?: boolean;
 }
 
 export const ExecutionDecisionSchema = z.object({
@@ -110,4 +112,5 @@ export const ExecutionDecisionSchema = z.object({
     )
     .optional(),
   explanation: z.string().optional(),
+  auto_allowed_in_core: z.boolean().optional(),
 });

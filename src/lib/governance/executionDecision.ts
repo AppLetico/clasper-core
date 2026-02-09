@@ -5,7 +5,8 @@ import { calculateRiskScore } from './riskScoring.js';
 import { getBudgetManager } from './budgetManager.js';
 import type { BudgetCheckResult } from './budgetManager.js';
 import type { SkillState } from '../skills/skillRegistry.js';
-import { logOverrideUsed } from './auditLog.js';
+import { config } from '../core/config.js';
+import { logOverrideUsed, logApprovalAutoAllowedInCore } from './auditLog.js';
 import type { OverrideRequest } from '../ops/overrides.js';
 import type { ExecutionDecision } from '../adapters/executionContract.js';
 import { evaluatePolicies } from '../policy/policyEngine.js';
@@ -131,6 +132,24 @@ export function evaluateExecutionDecision(
   }
 
   if (policyResult.decision === 'require_approval' && !request.override) {
+    if (config.requireApprovalInCore === 'allow') {
+      logApprovalAutoAllowedInCore({
+        tenantId: request.tenant_id,
+        workspaceId: request.workspace_id,
+        executionId,
+        reason: 'policy_requires_approval',
+      });
+      return {
+        allowed: true,
+        execution_id: executionId,
+        granted_scope: buildGrantedScope(request, budgetCheck),
+        decision: 'allow',
+        matched_policies: policyResult.matched_policies,
+        decision_trace: policyResult.decision_trace,
+        explanation: (policyResult.explanation || '') + ' (auto-allowed in Core; no approval UI in OSS)',
+        auto_allowed_in_core: true,
+      };
+    }
     return {
       allowed: false,
       execution_id: executionId,
@@ -145,6 +164,24 @@ export function evaluateExecutionDecision(
   }
 
   if (APPROVAL_RISK_LEVELS.includes(riskScore.level) && !request.override) {
+    if (config.requireApprovalInCore === 'allow') {
+      logApprovalAutoAllowedInCore({
+        tenantId: request.tenant_id,
+        workspaceId: request.workspace_id,
+        executionId,
+        reason: 'risk_requires_approval',
+      });
+      return {
+        allowed: true,
+        execution_id: executionId,
+        granted_scope: buildGrantedScope(request, budgetCheck),
+        decision: 'allow',
+        matched_policies: policyResult.matched_policies,
+        decision_trace: policyResult.decision_trace,
+        explanation: (policyResult.explanation || '') + ' (auto-allowed in Core; no approval UI in OSS)',
+        auto_allowed_in_core: true,
+      };
+    }
     return {
       allowed: false,
       execution_id: executionId,
@@ -159,12 +196,10 @@ export function evaluateExecutionDecision(
   }
 
   if (request.override) {
-    logOverrideUsed(request.tenant_id, {
+    logOverrideUsed({
+      tenantId: request.tenant_id,
       workspaceId: request.workspace_id,
-      actor: request.override.actor,
-      role: request.override.role,
-      action: request.override.action || 'execution_override',
-      targetId: executionId,
+      userId: request.override.actor,
       reasonCode: request.override.request.reason_code,
       justification: request.override.request.justification,
     });

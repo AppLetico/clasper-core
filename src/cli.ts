@@ -10,8 +10,6 @@ import { spawn } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { generateKeyPairSync } from "node:crypto";
-import { verifyExportBundle } from "./lib/exports/verifyBundle.js";
 
 // Enforce TLS 1.3 minimum before any network operations
 import * as tls from "node:tls";
@@ -56,7 +54,7 @@ function copyWorkspaceTemplate(targetDir: string, force: boolean): { created: st
 
 const program = new Command();
 
-program.name("clasper").description("Clasper agent daemon utilities").version("0.1.0");
+program.name("clasper-core").description("Clasper Core daemon utilities").version("0.1.0");
 
 program
   .command("init [dir]")
@@ -109,9 +107,9 @@ program
 
 program
   .command("export")
-  .description("Create a verifiable export bundle (Ops API)")
+  .description("Create a self-attested export bundle (Ops API)")
   .option("--base-url <url>", "Ops API base URL", "http://localhost:8081")
-  .option("--token <token>", "OIDC access token")
+  .option("--ops-api-key <key>", "Ops API key (X-Ops-Api-Key)")
   .option("--tenant-id <id>", "Tenant ID")
   .option("--workspace-id <id>", "Workspace ID")
   .option("--trace-id <id>", "Trace ID")
@@ -129,8 +127,8 @@ program
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
-    if (opts.token) {
-      headers.Authorization = `Bearer ${opts.token}`;
+    if (opts.opsApiKey) {
+      headers["X-Ops-Api-Key"] = opts.opsApiKey;
     }
     const response = await fetch(`${opts.baseUrl}/ops/api/exports`, {
       method: "POST",
@@ -145,44 +143,6 @@ program
     const buffer = Buffer.from(await response.arrayBuffer());
     writeFileSync(opts.out, buffer);
     console.log(`Export saved to ${opts.out}`);
-  });
-
-program
-  .command("verify <bundle>")
-  .description("Verify a Clasper export bundle offline")
-  .action(async (bundle) => {
-    const result = await verifyExportBundle(bundle);
-    if (!result.ok) {
-      console.error("Verification failed.");
-      if (result.failures.length) console.error("Failures:", result.failures);
-      if (result.fileFailures.length) console.error("File failures:", result.fileFailures);
-      if (result.auditChainFailures.length) console.error("Audit chain failures:", result.auditChainFailures);
-      process.exit(1);
-    }
-    console.log("Verification OK.");
-    if (result.signatureVerified !== null) {
-      console.log(`Signature verified: ${result.signatureVerified ? "yes" : "no"}`);
-    }
-  });
-
-program
-  .command("keys:generate")
-  .description("Generate Ed25519 signing keys for export bundles")
-  .option("--out <path>", "Output base path (no extension)", "./config/keys/clasper-export-key")
-  .action((opts) => {
-    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-    const privatePem = privateKey.export({ format: "pem", type: "pkcs8" }) as string;
-    const publicJwk = publicKey.export({ format: "jwk" }) as Record<string, unknown>;
-
-    const privatePath = `${opts.out}.pem`;
-    const publicPath = `${opts.out}.public.jwk.json`;
-
-    mkdirSync(dirname(privatePath), { recursive: true });
-    writeFileSync(privatePath, privatePem);
-    writeFileSync(publicPath, JSON.stringify(publicJwk, null, 2));
-
-    console.log(`Private key: ${privatePath}`);
-    console.log(`Public key: ${publicPath}`);
   });
 
 program.parse();

@@ -84,6 +84,13 @@ export async function verifyAdapterToken(token: string): Promise<AdapterAuthCont
     throw new AdapterAuthError('Missing required adapter claims', 'missing_claim');
   }
 
+  if (tenantId !== config.localTenantId) {
+    throw new AdapterAuthError('Tenant mismatch for single-tenant Core', 'invalid_token');
+  }
+  if (config.localWorkspaceId && workspaceId !== config.localWorkspaceId) {
+    throw new AdapterAuthError('Workspace mismatch for single-tenant Core', 'invalid_token');
+  }
+
   return {
     adapterId,
     tenantId,

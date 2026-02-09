@@ -18,13 +18,21 @@ let pendingConfirmCallback = null;
 const tokenInput = $("tokenInput");
 const saveTokenButton = $("saveToken");
 const authStatusCompact = $("authStatusCompact");
-const toggleAuthButton = $("toggleAuth");
-const authPanel = $("authPanel");
+const toggleAuthButton = $("menuEnterToken"); // Using menu item now
+const authModal = $("authModal");
+const authModalClose = $("authModalClose");
+const authModalCancel = $("authModalCancel");
 const pageTitle = $("pageTitle");
 const healthDot = $("healthDot");
 const healthText = $("healthText");
 const toastContainer = $("toastContainer");
 const pendingBadge = $("pendingBadge");
+const globalWorkspaceSelect = $("globalWorkspaceSelect");
+
+// User Menu
+const userMenuTrigger = $("userMenuTrigger");
+const userMenu = $("userMenu");
+const menuSignOut = $("menuSignOut");
 
 const traceTable = $("traceTable");
 const traceDetail = $("traceDetail");
@@ -35,7 +43,6 @@ const runDiffButton = $("runDiff");
 
 // Filters & Inputs
 const tenantFilter = $("tenantFilter");
-const workspaceFilter = $("workspaceFilter");
 const agentFilter = $("agentFilter");
 const statusFilter = $("statusFilter");
 const riskFilter = $("riskFilter");
@@ -106,7 +113,6 @@ async function fetchMe() {
     
     // Auto-fill context
     if (!tenantFilter.value) tenantFilter.value = data.user.tenant_id || "";
-    if (!workspaceFilter.value) workspaceFilter.value = data.user.workspace_id || "";
   } catch (error) {
     setAuthText("Auth Error");
     applyPermissions([]);
@@ -134,6 +140,10 @@ function setActiveView(view) {
   if (loader) loader();
 }
 
+function currentWorkspaceId() {
+  return globalWorkspaceSelect ? globalWorkspaceSelect.value : "";
+}
+
 function parseHash() {
   const view = window.location.hash.replace("#", "") || "dashboard";
   setActiveView(view);
@@ -142,7 +152,7 @@ function parseHash() {
 const viewLoaders = {
   dashboard: loadDashboard,
   traces: loadTraces,
-  workspaces: () => {},
+  deployments: () => {},
   skills: loadSkills,
   policies: loadPolicies,
   adapters: loadAdapters,
@@ -166,7 +176,11 @@ function currentTenantId() {
 
 function formatCost(cost) {
   if (cost === undefined || cost === null || Number.isNaN(Number(cost))) return "-";
-  return `$${Number(cost).toFixed(4)}`;
+  const num = Number(cost);
+  if (num === 0) return "$0.00";
+  // Show 4 decimals for small fractional costs (common in LLM tokens), otherwise standard 2
+  if (num < 0.01) return `$${num.toFixed(4)}`;
+  return `$${num.toFixed(2)}`;
 }
 
 function badge(text, kind) {
@@ -274,6 +288,7 @@ async function loadTraceSummary() {
     start_date: new Date().toISOString().split('T')[0],
     tenant_id: currentTenantId() 
   });
+  if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
   
   try {
     const res = await fetch(`/ops/api/traces?${params}`, { headers: headers() });
@@ -292,6 +307,7 @@ async function loadTraceSummary() {
 async function loadRiskSummary() {
   try {
     const params = new URLSearchParams({ tenant_id: currentTenantId() });
+    if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
     const res = await fetch(`/ops/api/dashboards/risk?${params}`, { headers: headers() });
     const data = await res.json();
     const levels = data.dashboard?.levels || {};
@@ -306,6 +322,7 @@ async function loadRiskSummary() {
 async function loadCostSummary() {
   try {
     const params = new URLSearchParams({ tenant_id: currentTenantId() });
+    if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
     const res = await fetch(`/ops/api/dashboards/cost?${params}`, { headers: headers() });
     const data = await res.json();
     const daily = data.dashboard?.daily || [];
@@ -325,6 +342,7 @@ async function loadCostSummary() {
 async function loadApprovalsSummary() {
   try {
     const params = new URLSearchParams({ tenant_id: currentTenantId(), status: 'pending' });
+    if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
     const res = await fetch(`/ops/api/decisions?${params}`, { headers: headers() });
     const data = await res.json();
     const count = data.decisions?.length || 0;
@@ -347,6 +365,7 @@ async function loadHighRiskTraces() {
       risk_level: 'high', 
       limit: 5 
     });
+    if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
     const res = await fetch(`/ops/api/traces?${params}`, { headers: headers() });
     const data = await res.json();
     const traces = data.traces || [];
@@ -374,24 +393,34 @@ async function loadHighRiskTraces() {
 
 // --- Traces Logic ---
 async function loadTraces() {
-  traceTable.innerHTML = `<tr><td colspan="8" class="empty-state">Loading...</td></tr>`;
-  
-  const params = new URLSearchParams({
-    tenant_id: currentTenantId(),
-    limit: state.tracePage.limit,
-    offset: state.tracePage.offset,
-    ...Object.fromEntries(new FormData(document.querySelector('.toolbar-group'))) // grabs inputs if form used, but here we do manual
-  });
-  
-  if (workspaceFilter.value) params.set("workspace_id", workspaceFilter.value);
-  if (statusFilter.value) params.set("status", statusFilter.value);
+  traceTable.innerHTML = `
+    <tr>
+      <td colspan="8">
+        <div class="empty-state loading">
+          <div class="spinner"></div>
+          <div>Loading traces...</div>
+        </div>
+      </td>
+    </tr>`;
   
   try {
+    const params = new URLSearchParams({
+      tenant_id: currentTenantId(),
+      limit: state.tracePage.limit,
+    offset: state.tracePage.offset
+  });
+  
+  if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
+  
+  if (statusFilter.value) params.set("status", statusFilter.value);
+    if (riskFilter.value) params.set("risk_level", riskFilter.value);
+    
     const res = await fetch(`/ops/api/traces?${params}`, { headers: headers() });
     const data = await res.json();
     state.traces = data.traces || [];
     renderTracesTable();
   } catch (e) {
+    console.error("Load traces error:", e);
     traceTable.innerHTML = `<tr><td colspan="8" class="empty-state">Failed to load traces</td></tr>`;
   }
 }
@@ -458,7 +487,10 @@ function renderTraceDetail(trace) {
 
 // --- Other Loaders (Stubs for brevity, implement similarly) ---
 async function loadSkills() {
-  const res = await fetch(`/ops/api/skills/registry`, { headers: headers() });
+  const params = new URLSearchParams();
+  if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
+  
+  const res = await fetch(`/ops/api/skills/registry?${params}`, { headers: headers() });
   const data = await res.json();
   const list = $("skillList");
   list.innerHTML = (data.skills || []).map(s => `
@@ -473,7 +505,10 @@ async function loadSkills() {
 }
 
 async function loadPolicies() {
-  const res = await fetch(`/ops/api/policies?tenant_id=${currentTenantId()}`, { headers: headers() });
+  const params = new URLSearchParams({ tenant_id: currentTenantId() });
+  if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
+  
+  const res = await fetch(`/ops/api/policies?${params}`, { headers: headers() });
   const data = await res.json();
   $("policiesList").innerHTML = (data.policies || []).map(p => `
     <div class="detail-block">
@@ -484,7 +519,10 @@ async function loadPolicies() {
 }
 
 async function loadAdapters() {
-  const res = await fetch(`/ops/api/adapters?tenant_id=${currentTenantId()}`, { headers: headers() });
+  const params = new URLSearchParams({ tenant_id: currentTenantId() });
+  if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
+
+  const res = await fetch(`/ops/api/adapters?${params}`, { headers: headers() });
   const data = await res.json();
   $("adapterList").innerHTML = (data.adapters || []).map(a => `
     <div class="stat-card">
@@ -498,7 +536,10 @@ async function loadAdapters() {
 }
 
 async function loadDecisions() {
-  const res = await fetch(`/ops/api/decisions?tenant_id=${currentTenantId()}`, { headers: headers() });
+  const params = new URLSearchParams({ tenant_id: currentTenantId(), status: 'pending' });
+  if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
+  
+  const res = await fetch(`/ops/api/decisions?${params}`, { headers: headers() });
   const data = await res.json();
   $("decisionList").innerHTML = (data.decisions || []).map(d => `
     <div class="detail-block">
@@ -517,7 +558,7 @@ window.resolveDecision = async function(id, action) {
     await fetch(`/api/decisions/${id}/resolve`, {
       method: 'POST',
       headers: { ...headers(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, justification: "Ops console action", tenant_id: currentTenantId() })
+      body: JSON.stringify({ action, justification: "Ops console action", tenant_id: currentTenantId(), workspace_id: currentWorkspaceId() })
     });
     showToast("Decision resolved", "success");
     loadDecisions();
@@ -528,6 +569,8 @@ window.resolveDecision = async function(id, action) {
 
 async function loadAudit() {
   const params = new URLSearchParams({ tenant_id: currentTenantId(), limit: 50 });
+  if (currentWorkspaceId()) params.set("workspace_id", currentWorkspaceId());
+  
   const res = await fetch(`/ops/api/audit?${params}`, { headers: headers() });
   const data = await res.json();
   $("auditList").innerHTML = `
@@ -549,8 +592,49 @@ async function loadAudit() {
 
 // --- Event Listeners ---
 window.addEventListener("hashchange", parseHash);
-saveTokenButton.addEventListener("click", () => { setToken(tokenInput.value); fetchMe(); });
-toggleAuthButton.addEventListener("click", () => authPanel.classList.toggle("hidden"));
+
+function closeAuthModal() {
+  authModal.classList.add("hidden");
+}
+
+saveTokenButton.addEventListener("click", () => { 
+  setToken(tokenInput.value); 
+  fetchMe(); 
+  closeAuthModal(); 
+});
+
+toggleAuthButton.addEventListener("click", () => {
+  authModal.classList.remove("hidden");
+  tokenInput.focus();
+  userMenu.classList.add("hidden"); // Close menu when opening auth
+});
+
+authModalClose.addEventListener("click", closeAuthModal);
+authModalCancel.addEventListener("click", closeAuthModal);
+
+// Close auth modal on backdrop click
+authModal.querySelector(".modal-backdrop").addEventListener("click", closeAuthModal);
+
+// User Menu Toggles
+userMenuTrigger.addEventListener("click", (e) => {
+  e.stopPropagation();
+  userMenu.classList.toggle("hidden");
+  userMenuTrigger.classList.toggle("active");
+});
+
+document.addEventListener("click", (e) => {
+  if (!userMenu.contains(e.target) && !userMenuTrigger.contains(e.target)) {
+    userMenu.classList.add("hidden");
+    userMenuTrigger.classList.remove("active");
+  }
+});
+
+menuSignOut.addEventListener("click", () => {
+  setToken("");
+  fetchMe();
+  userMenu.classList.add("hidden");
+});
+
 refreshDashboard.addEventListener("click", loadDashboard);
 refreshTraces.addEventListener("click", loadTraces);
 closeTraceDrawer.addEventListener("click", closeDrawer);
@@ -572,7 +656,209 @@ function applyPermissions(perms) {
 
 function hasPermission(p) { return state.permissions.includes(p); }
 
+// --- SSE Logic ---
+let eventSource = null;
+let reconnectTimeout = null;
+
+function setupSSE() {
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+
+  const tenantId = currentTenantId();
+  if (!tenantId) return; // Wait until we have a tenant
+
+  const url = new URL('/ops/api/events', window.location.origin);
+  url.searchParams.set('tenant_id', tenantId);
+  // Pass token if available (server dependent, usually cookies or query param)
+  const token = getToken();
+  if (token) url.searchParams.set('token', token);
+
+  console.log("Connecting to SSE:", url.toString());
+
+  try {
+    eventSource = new EventSource(url);
+    
+    eventSource.onopen = () => {
+      console.log("SSE Connected");
+      // Optional: show connection status
+    };
+
+    eventSource.onerror = (err) => {
+      console.error("SSE Error:", err);
+      eventSource.close();
+      eventSource = null;
+      // Reconnect with backoff
+      reconnectTimeout = setTimeout(setupSSE, 5000);
+    };
+
+    // Listen for events
+    eventSource.addEventListener("trace.created", () => {
+      incrementTraceCount();
+      if (location.hash.includes("traces")) loadTraces(); // Refresh list if viewing traces
+      // Also refresh dashboard recent traces if viewing dashboard
+      if (!location.hash || location.hash === "#dashboard") loadHighRiskTraces(); 
+    });
+
+    eventSource.addEventListener("trace.completed", () => {
+      // Maybe update stats?
+      loadTraceSummary(); // Refresh stats fully
+      if (location.hash.includes("traces")) loadTraces();
+    });
+
+    eventSource.addEventListener("decision.created", () => {
+      loadApprovalsSummary();
+      if (location.hash.includes("approvals")) loadDecisions();
+      showToast("New approval request pending", "info");
+    });
+
+    eventSource.addEventListener("decision.resolved", () => {
+      loadApprovalsSummary();
+      if (location.hash.includes("approvals")) loadDecisions();
+    });
+
+    // Generic handler for debugging
+    eventSource.onmessage = (e) => {
+      // console.log("SSE Message:", e.data);
+    };
+
+  } catch (e) {
+    console.error("Failed to setup SSE", e);
+  }
+}
+
+function incrementTraceCount() {
+  const el = $("metricTracesToday");
+  if (el && el.textContent !== "-") {
+    el.textContent = parseInt(el.textContent || "0") + 1;
+  } else {
+    loadTraceSummary();
+  }
+}
+
 // --- Init ---
 tokenInput.value = getToken();
-fetchMe();
+fetchMe().then(() => {
+  setupSSE(); // Connect after auth check
+  loadWorkspaces();
+});
 parseHash();
+
+// Helper to load workspaces for the selector
+async function loadWorkspaces() {
+  try {
+    // This endpoint might not exist yet, we can mock or try to list from traces
+    // For now, let's just use the user's workspace if available, or fetch unique workspaces from traces
+    const res = await fetch(`/ops/api/traces?tenant_id=${currentTenantId()}&limit=100`, { headers: headers() });
+    const data = await res.json();
+    const workspaces = new Set(data.traces.map(t => t.workspace_id).filter(Boolean));
+    
+    // Add options
+    const current = globalWorkspaceSelect.value;
+    globalWorkspaceSelect.innerHTML = `<option value="">All Workspaces</option>`;
+    workspaces.forEach(ws => {
+      const opt = document.createElement("option");
+      opt.value = ws;
+      opt.textContent = ws;
+      globalWorkspaceSelect.appendChild(opt);
+    });
+    
+    if (state.user?.workspace_id && workspaces.has(state.user.workspace_id)) {
+        globalWorkspaceSelect.value = state.user.workspace_id;
+    } else {
+        globalWorkspaceSelect.value = current;
+    }
+  } catch (e) {
+    console.warn("Failed to load workspaces list", e);
+  }
+}
+
+// --- Tooltip System ---
+function initTooltips() {
+  let activeTooltip = null;
+  let activeTarget = null;
+
+  document.body.addEventListener("mouseover", (e) => {
+    const target = e.target.closest("[data-tooltip]");
+    if (!target) {
+      if (activeTooltip) hideTooltip();
+      return;
+    }
+    if (target === activeTarget) return;
+    
+    showTooltip(target);
+  });
+
+  document.body.addEventListener("mouseout", (e) => {
+    const target = e.target.closest("[data-tooltip]");
+    if (target && target === activeTarget) {
+      // Check if moving into the tooltip itself (rare but possible with fixed positioning if overlapping)
+      // but tooltip has pointer-events: none so it shouldn't capture mouse events.
+      hideTooltip();
+    }
+  });
+  
+  // Also hide on scroll to prevent detached tooltips
+  window.addEventListener("scroll", () => { if (activeTooltip) hideTooltip(); }, true);
+
+  function showTooltip(target) {
+    if (activeTooltip) hideTooltip();
+    
+    activeTarget = target;
+    const text = target.getAttribute("data-tooltip");
+    if (!text) return;
+
+    const tooltip = document.createElement("div");
+    tooltip.className = "tooltip-popup";
+    tooltip.textContent = text;
+    document.body.appendChild(tooltip);
+    activeTooltip = tooltip;
+
+    // Position it
+    const rect = target.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    
+    let top = rect.top - tooltipRect.height - 8;
+    let left = rect.left + (rect.width / 2) - (tooltipRect.width / 2);
+    
+    // Boundary checks
+    if (top < 0) {
+       // Flip to bottom if no space on top
+       top = rect.bottom + 8;
+       tooltip.classList.add("bottom"); // We could add class to flip arrow if needed
+    }
+    if (left < 10) left = 10;
+    if (left + tooltipRect.width > window.innerWidth - 10) {
+      left = window.innerWidth - tooltipRect.width - 10;
+    }
+
+    tooltip.style.top = `${top}px`;
+    tooltip.style.left = `${left}px`;
+    
+    // Trigger animation
+    requestAnimationFrame(() => tooltip.classList.add("visible"));
+  }
+
+  function hideTooltip() {
+    if (!activeTooltip) return;
+    const t = activeTooltip;
+    activeTooltip = null;
+    activeTarget = null;
+    t.classList.remove("visible");
+    setTimeout(() => t.remove(), 150);
+  }
+}
+
+// Global workspace change handler
+globalWorkspaceSelect.addEventListener("change", () => {
+  // Reload current view
+  const view = window.location.hash.replace("#", "") || "dashboard";
+  if (viewLoaders[view]) viewLoaders[view]();
+});
+
+initTooltips();

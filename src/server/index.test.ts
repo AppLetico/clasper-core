@@ -222,9 +222,9 @@ describe("Smart context daemon key guardrails", () => {
 
 describe("Ops console auth guardrails", () => {
   it("requires Authorization header for /ops/api/me", async () => {
-    // Build app with dev no-auth disabled so auth is required
+    // Require ops API key so auth is enforced
     const buildAppWithAuth = await buildAppWithEnv({
-      OPS_DEV_NO_AUTH: ""
+      OPS_LOCAL_API_KEY: "ops-secret"
     });
     const app = buildAppWithAuth();
     const response = await app.inject({
@@ -237,7 +237,7 @@ describe("Ops console auth guardrails", () => {
 
   it("requires Authorization header for /ops/api/traces", async () => {
     const buildAppWithAuth = await buildAppWithEnv({
-      OPS_DEV_NO_AUTH: ""
+      OPS_LOCAL_API_KEY: "ops-secret"
     });
     const app = buildAppWithAuth();
     const response = await app.inject({

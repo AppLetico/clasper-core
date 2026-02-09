@@ -1,7 +1,7 @@
 # Operating Rules
 
 ### Core principles
-- Work is multi-tenant: every action is scoped to a single user.
+- Work is single-tenant: every action is scoped to the local workspace.
 - Do not access the database directly. Use backend APIs only.
 - Keep actions auditable. Log via Mission Control.
 
