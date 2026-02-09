@@ -23,13 +23,16 @@
 
 **Clasper Core** is the **local, single-tenant governance layer** for AI execution. It decides whether execution is allowed, under what constraints, and produces **self-attested evidence** you can use internally. **Execution is optional**: you can run governance-only (your systems or external adapters execute) or add the built-in stateless runtime for LLM execution.
 
-> **Clasper Core governs execution you own.**  
-> **It does not provide shared authority, approvals, or externally verifiable audit.**
+## Open Source vs Hosted Clasper
 
-**External Proof** = evidence that can be verified by a party that does not trust the operator.  
-**Clasper Core never generates External Proof.** That is Cloud-only.
+**Clasper Core is fully open-source and self-hostable (Apache-2.0).** You can run it locally forever.
 
-If you need shared authority, approvals, or compliance-grade evidence, use **Clasper Cloud**. See [`docs/oss-vs-cloud.md`](docs/oss-vs-cloud.md).
+> **Clasper Core is not crippleware and does not phone home.**
+
+- **What’s open (Clasper Core)**: local runtime/engine, agent orchestration, policy evaluation primitives, local governance hooks, CLI/config-driven workflows, and extensibility points.
+- **What’s hosted (Clasper Cloud)**: managed infrastructure and “scale + governance” features like multi-tenant control plane, hosted audit storage, org-wide dashboards, analytics, alerting/notifications, managed identity/secrets brokering, fleet-wide controls, and compliance reporting.
+
+If you want the deeper boundary (and the “trust model” details), see [`docs/oss-vs-cloud.md`](docs/oss-vs-cloud.md).
 
 ---
 
@@ -54,8 +57,12 @@ If you need shared authority, approvals, or compliance-grade evidence, use **Cla
 
 ## Approvals in OSS
 
-Clasper Core can emit **pending** decisions, but **cannot complete approvals without Cloud**.  
-Any local override must be:
+Clasper Core can emit **pending** decisions. How you resolve those is up to you:
+
+- wire it into **your** approval workflow (common for self-hosting)
+- or use **Clasper Cloud** for a hosted approvals UI and Cloud-issued decision tokens
+
+If you do a local override, it must be:
 
 - explicitly labeled as **LOCAL_OVERRIDE**
 - recorded as **self-attested** with a trust downgrade
@@ -146,7 +153,3 @@ See [`docs/oss-vs-cloud.md`](docs/oss-vs-cloud.md) for the full boundary.
 - [Adapter Contract](https://clasper.ai/docs/adapter-contract/)
 - [Workspace](https://clasper.ai/docs/workspace/)
 - [Governance](https://clasper.ai/docs/governance/)
-
-## Trademark
-
-See [`TRADEMARKS.md`](TRADEMARKS.md) for “Clasper” and “Clasper Cloud” usage rules.
