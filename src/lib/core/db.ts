@@ -107,6 +107,7 @@ export function initDatabase(): void {
       tenant_id TEXT NOT NULL,
       workspace_id TEXT,
       trace_id TEXT,
+      user_id TEXT,
       event_type TEXT NOT NULL,
       event_data JSON NOT NULL,
       created_at TEXT DEFAULT (datetime('now'))
@@ -370,6 +371,7 @@ export function initDatabase(): void {
   runAdapterTraceColumnsMigration();
   runTraceIntegrityColumnsMigration();
   runTrustStatusColumnMigration();
+  runAuditLogUserIdColumnMigration();
 }
 
 /**
@@ -422,6 +424,28 @@ function runV121IndexMigration(): void {
     -- Index for audit log by workspace
     CREATE INDEX IF NOT EXISTS idx_audit_workspace
       ON audit_log(workspace_id, created_at DESC) WHERE workspace_id IS NOT NULL;
+  `);
+}
+
+/**
+ * Migration to add user_id column to audit_log table.
+ * This is used to display an "Actor" in the Ops UI audit page.
+ */
+function runAuditLogUserIdColumnMigration(): void {
+  const database = getDatabase();
+
+  const columns = database
+    .prepare("PRAGMA table_info(audit_log)")
+    .all() as { name: string }[];
+
+  const hasUserId = columns.some((c) => c.name === "user_id");
+  if (hasUserId) return;
+
+  database.exec(`ALTER TABLE audit_log ADD COLUMN user_id TEXT;`);
+
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_audit_user
+      ON audit_log(user_id, created_at DESC) WHERE user_id IS NOT NULL;
   `);
 }
 

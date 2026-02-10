@@ -2,6 +2,7 @@ import { ExecutionBadge, GovernanceBadge } from "./badge.jsx";
 import { useState } from "preact/hooks";
 import { apiPost } from "../api.js";
 import { showToast } from "../state.js";
+import { TRUST_LABEL, titleCase } from "../labelColors.js";
 
 /**
  * Card for a pending decision when no trace is available (same visual style as TraceCard).
@@ -218,7 +219,7 @@ export function TraceCard({ trace, onClick }) {
           )}
         </div>
         <div style={{ display: "flex", gap: "8px", opacity: 0.8 }}>
-          <span title={`Trust: ${trace.trust_status || "unknown"}`}>🛡️ {trace.trust_status === "verified" ? "verified" : "unverified"}</span>
+          <span title={`Trust: ${trace.trust_status || "unknown"}`}>🛡️ {TRUST_LABEL[trace.trust_status] ?? titleCase(trace.trust_status || "unknown")}</span>
         </div>
       </div>
     </div>

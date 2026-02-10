@@ -791,15 +791,26 @@ export function buildApp() {
       });
 
       return reply.send({
-        entries: result.entries.map(entry => ({
-          id: entry.id,
-          event_type: entry.eventType,
-          tenant_id: entry.tenantId,
-          workspace_id: entry.workspaceId,
-          trace_id: entry.traceId,
-          event_data: entry.eventData,
-          created_at: entry.createdAt
-        })),
+        entries: result.entries.map(entry => {
+          const ed = entry.eventData as Record<string, unknown>;
+          const executionId = typeof ed["execution_id"] === "string" ? ed["execution_id"] : undefined;
+          const policyId = typeof ed["policy_id"] === "string" ? ed["policy_id"] : undefined;
+          const skillId = typeof ed["skill_id"] === "string" ? ed["skill_id"] : undefined;
+          const adapterId = typeof ed["adapter_id"] === "string" ? ed["adapter_id"] : undefined;
+          const targetId = entry.traceId || executionId || policyId || skillId || adapterId;
+
+          return {
+            id: entry.id,
+            event_type: entry.eventType,
+            tenant_id: entry.tenantId,
+            workspace_id: entry.workspaceId,
+            trace_id: entry.traceId,
+            user_id: entry.userId,
+            target_id: targetId,
+            event_data: entry.eventData,
+            created_at: entry.createdAt
+          };
+        }),
         total: result.total,
         has_more: result.hasMore,
         limit: query.limit,

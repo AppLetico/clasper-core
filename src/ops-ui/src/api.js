@@ -18,6 +18,23 @@ export async function apiPost(path, body) {
   });
 }
 
+export async function apiPatch(path, body) {
+  return api(path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function apiDelete(path, body) {
+  const opts = { method: "DELETE" };
+  if (body != null && Object.keys(body).length > 0) {
+    opts.headers = { "Content-Type": "application/json" };
+    opts.body = JSON.stringify(body);
+  }
+  return api(path, opts);
+}
+
 // --- Param builder (respects global workspace + tenant) ---
 export function buildParams(extra = {}) {
   const params = new URLSearchParams({ tenant_id: tenantId.value, ...extra });

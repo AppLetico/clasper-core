@@ -95,14 +95,15 @@ export class AuditLog {
 
     const stmt = db.prepare(`
       INSERT INTO audit_log (
-        tenant_id, workspace_id, trace_id, event_type, event_data, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        tenant_id, workspace_id, trace_id, user_id, event_type, event_data, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
       data.tenantId,
       data.workspaceId || null,
       data.traceId || null,
+      data.userId || null,
       eventType,
       JSON.stringify(eventData),
       createdAt

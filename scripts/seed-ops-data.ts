@@ -588,6 +588,16 @@ function buildTrace(params: {
   const durationMs = 1000 + toolCount * 400 + (params.error ? 500 : 900);
   const completedAt = new Date(started.getTime() + durationMs).toISOString();
 
+  const annotations = Object.fromEntries(params.scenario.annotations.map((a) => [a.key, a.value]));
+  const intent =
+    params.scenario.name === "deploy"
+      ? `deploy_${annotations.service ?? "service"}_${annotations.version ?? "v0.0.0"}`
+      : params.scenario.name === "incident_triage"
+        ? `triage_${annotations.ticket ?? "incident"}`
+        : params.scenario.name === "config_change"
+          ? `config_change_${annotations.service ?? "service"}`
+          : params.scenario.name;
+
   const { steps, outputToolCalls } = buildSteps({
     tools: params.scenario.tools,
     includeError: !!params.error,
@@ -626,7 +636,8 @@ function buildTrace(params: {
       environment: params.environment,
       seeded: "true",
       scenario: params.scenario.name,
-      agent_id: params.scenario.annotations.find(a => a.key === "agent_id")?.value || "unknown",
+      intent,
+      agent_id: annotations.agent_id || "unknown",
     },
     adapter_id: params.adapterId,
     granted_scope: {

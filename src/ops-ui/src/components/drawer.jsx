@@ -3,6 +3,7 @@ import { useEffect, useState } from "preact/hooks";
 import { XIcon } from "./icons.jsx";
 import { ExecutionBadge, GovernanceBadge } from "./badge.jsx";
 import { formatCost, tenantId } from "../state.js";
+import { TRUST_LABEL, titleCase } from "../labelColors.js";
 import { api, buildParams } from "../api.js";
 
 export const drawerOpen = signal(false);
@@ -86,7 +87,7 @@ function TraceDetailContent({ trace }) {
         <div class="detail-row">
             <span class="detail-label" title="Verification status of the trace source">Trust</span>
             <span class="mono" title="Local/self-attested; verification may be unavailable in OSS mode">
-                {trace.trust_status || "-"} (local)
+                {trace.trust_status ? (TRUST_LABEL[trace.trust_status] ?? titleCase(trace.trust_status)) : "-"} (local)
             </span>
         </div>
         <div class="detail-row">

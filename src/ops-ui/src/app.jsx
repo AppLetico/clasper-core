@@ -19,6 +19,7 @@ import { AdaptersView } from "./views/adapters.jsx";
 import { ApprovalsView } from "./views/approvals.jsx";
 import { AuditView } from "./views/audit.jsx";
 import { SettingsView } from "./views/settings.jsx";
+import { ToolsView } from "./views/tools.jsx";
 
 const VIEWS = {
   dashboard: DashboardView,
@@ -26,6 +27,7 @@ const VIEWS = {
   deployments: DeploymentsView,
   cost: CostView,
   skills: SkillsView,
+  tools: ToolsView,
   policies: PoliciesView,
   adapters: AdaptersView,
   approvals: ApprovalsView,

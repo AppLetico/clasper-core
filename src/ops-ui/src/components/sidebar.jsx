@@ -1,7 +1,7 @@
 import { useState, useEffect } from "preact/hooks";
 import { currentRoute, selectedWorkspace, tenantId, user, authModalOpen } from "../state.js";
 import { fetchWorkspaces, signOut, api, buildParams } from "../api.js";
-import { DashboardIcon, SearchIcon, LayersIcon, DollarIcon, BoltIcon, GearIcon, ShieldIcon, ThumbsUpIcon, FileIcon, UserIcon, LockIcon, LogOutIcon, ChevronDownIcon } from "./icons.jsx";
+import { DashboardIcon, SearchIcon, LayersIcon, DollarIcon, BoltIcon, GearIcon, ShieldIcon, ThumbsUpIcon, FileIcon, UserIcon, LockIcon, LogOutIcon, ChevronDownIcon, WrenchIcon } from "./icons.jsx";
 
 const NAV = [
   { group: "Platform", items: [
@@ -12,6 +12,7 @@ const NAV = [
   ]},
   { group: "Registry", items: [
     { id: "skills", label: "Skills", icon: BoltIcon },
+    { id: "tools", label: "Tools", icon: WrenchIcon },
     { id: "adapters", label: "Adapters", icon: GearIcon },
   ]},
   { group: "Governance", items: [

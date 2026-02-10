@@ -6,6 +6,7 @@
   --bg-sidebar: #0f172a;
   --bg-panel: #1e293b;
   --bg-panel-hover: #334155;
+  --bg-subtle: #0f172a;
   --bg-input: #0f172a;
   
   /* Borders */
@@ -25,12 +26,14 @@
   --accent-warn: #f59e0b;
   --accent-danger: #ef4444;
   --accent-info: #0ea5e9;
+  --accent-muted: #64748b;
   
   /* Status Backgrounds (Transparent) */
   --bg-success: rgba(16, 185, 129, 0.15);
   --bg-warn: rgba(245, 158, 11, 0.15);
   --bg-danger: rgba(239, 68, 68, 0.15);
   --bg-info: rgba(14, 165, 233, 0.15);
+  --bg-muted: rgba(100, 116, 139, 0.2);
   
   /* Shadows */
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
@@ -50,6 +53,7 @@
   --bg-sidebar: #ffffff;
   --bg-panel: #ffffff;
   --bg-panel-hover: #f8fafc;
+  --bg-subtle: #f8fafc;
   --bg-input: #f8fafc;
   
   --border-subtle: #e2e8f0;
@@ -59,6 +63,8 @@
   --text-primary: #0f172a;
   --text-secondary: #475569;
   --text-tertiary: #94a3b8;
+  --accent-muted: #64748b;
+  --bg-muted: rgba(100, 116, 139, 0.15);
   
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
@@ -483,54 +489,176 @@ button, input, select, textarea { font-family: inherit; font-size: 13px; }
 
 /* Cost Page */
 .panel-summary {
-  padding: 16px 20px;
+  padding: 16px 24px;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-sidebar); /* ensure background matches */
+  background: var(--bg-sidebar);
 }
+
+.cost-chart-wrap {
+  display: flex;
+  align-items: flex-end; /* Align axis and chart to bottom */
+  gap: 16px;
+  margin-top: 16px;
+  min-height: 240px;
+  padding: 0 12px;
+}
+
+.cost-y-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 180px; /* Match track height */
+  padding: 0;
+  margin-bottom: 24px; /* Lift up to match track bottom (date height + gap) */
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  text-align: right;
+  min-width: 32px;
+}
+
+.cost-y-tick {
+  line-height: 1;
+  position: relative;
+}
+
+/* Add tick marks */
+.cost-y-tick::after {
+  content: '';
+  position: absolute;
+  right: -16px;
+  top: 50%;
+  width: 4px;
+  height: 1px;
+  background: var(--border-panel);
+}
+
+.cost-chart-area {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.cost-grid-lines {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 24px; /* Align with track bottom */
+  height: 180px; /* Match track height */
+  pointer-events: none;
+  z-index: 0;
+}
+
+.cost-grid-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-bottom: 1px dashed var(--border-panel);
+  opacity: 0.5;
+}
+
 .cost-bars {
   display: flex;
   align-items: flex-end;
   gap: 12px;
-  height: 140px;
-  margin-top: 8px;
-  padding-bottom: 4px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-.cost-bar {
   flex: 1;
-  max-width: 60px;
-  border: none;
-  background: var(--accent-primary);
-  opacity: 0.8;
-  border-radius: 4px 4px 0 0;
-  min-height: 4px;
-  cursor: pointer;
-  transition: opacity 0.15s, transform 0.15s;
+  min-width: 0;
+  position: relative;
+  z-index: 1;
 }
-.cost-bar:hover {
-  opacity: 1;
-  transform: scaleY(1.05);
-  transform-origin: bottom;
-}
-.cost-row {
-  width: 100%;
+
+.cost-bar-column {
+  flex: 1;
+  min-width: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 0;
+  gap: 8px;
+  padding: 0;
   border: none;
   background: transparent;
-  color: var(--text-primary);
-  border-bottom: 1px solid var(--border-subtle);
   cursor: pointer;
-  text-align: left;
+  color: var(--text-primary);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.cost-row:hover {
-  background: rgba(255, 255, 255, 0.02);
+
+.cost-bar-column:hover {
+  transform: translateY(-2px);
 }
-.cost-row:last-child {
-  border-bottom: none;
+
+.cost-bar-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  opacity: 0.8;
+  transition: all 0.2s;
+}
+
+.cost-bar-column:hover .cost-bar-value {
+  color: var(--accent-primary);
+  opacity: 1;
+  transform: translateY(-2px);
+}
+
+.cost-bar-track {
+  width: 100%;
+  height: 180px; /* Increased height */
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  position: relative;
+}
+
+/* Hover effect background for the whole column track area? Optional. */
+.cost-bar-track::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 6px;
+  background: var(--bg-panel);
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: -1;
+}
+.cost-bar-column:hover .cost-bar-track::before {
+  opacity: 0.5;
+}
+
+.cost-bar {
+  width: 100%;
+  max-width: 32px;
+  border: none;
+  /* Spectacular Gradient */
+  background: linear-gradient(180deg, var(--accent-primary) 0%, rgba(59, 130, 246, 0.6) 100%);
+  border-radius: 4px 4px 2px 2px;
+  min-height: 4px;
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); /* Bouncy spring */
+  flex-shrink: 0;
+  position: relative;
+}
+
+/* Glow effect on hover */
+.cost-bar-column:hover .cost-bar {
+  background: linear-gradient(180deg, var(--accent-primary-hover) 0%, var(--accent-primary) 100%);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+}
+
+.cost-bar-date {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  height: 16px; /* Fixed height for alignment */
+}
+
+.cost-bar-column:hover .cost-bar-date {
+  color: var(--text-primary);
 }
 
 /* Grid Layouts */
@@ -584,6 +712,7 @@ button, input, select, textarea { font-family: inherit; font-size: 13px; }
 }
 
 .text-xs { font-size: 11px; }
+.text-sm { font-size: 13px; }
 .text-tertiary { color: var(--text-tertiary); }
 .border-danger { border-bottom-color: rgba(239, 68, 68, 0.2); }
 
@@ -1034,6 +1163,7 @@ textarea.code-editor { font-family: 'JetBrains Mono', monospace; font-size: 12px
 /* Badge Variants */
 .badge-pill.success { background: var(--bg-success); color: var(--accent-success); border-color: transparent; }
 .badge-pill.danger { background: var(--bg-danger); color: var(--accent-danger); border-color: transparent; }
+.badge-pill.muted { background: var(--bg-muted); color: var(--accent-muted); border-color: transparent; }
 
 /* Settings Page */
 .setting-row {

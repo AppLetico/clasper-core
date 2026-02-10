@@ -3,13 +3,13 @@
  * Ops Console dev server with hot reload.
  *
  * - esbuild ctx.watch() rebuilds on file changes
- * - A tiny HTTP server on :8082 provides an /esbuild SSE endpoint
+ * - A tiny HTTP server on :8083 provides an /esbuild SSE endpoint (8082 is the main API)
  * - A banner snippet in the dev bundle connects to it and reloads on rebuild
  */
 import * as esbuild from "esbuild";
 import http from "node:http";
 
-const LIVE_RELOAD_PORT = 8082;
+const LIVE_RELOAD_PORT = 8083;
 
 // --- SSE live-reload server ---
 const clients = new Set();

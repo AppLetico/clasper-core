@@ -1,10 +1,11 @@
 import { useEffect, useState } from "preact/hooks";
 import { tenantId, selectedWorkspace } from "../state.js";
 import { api, buildParams } from "../api.js";
-import { PendingDecisionCard } from "../components/trace-card.jsx";
+import { HelpCircleIcon } from "../components/icons.jsx";
 
 export function ApprovalsView() {
   const [decisions, setDecisions] = useState(null);
+  const [showHelp, setShowHelp] = useState(false);
 
   const load = async () => {
     try {
@@ -19,20 +20,30 @@ export function ApprovalsView() {
 
   return (
     <section>
-      <div style={{ marginBottom: "24px" }}>
-        <h2 style={{ fontSize: "20px", fontWeight: 600, marginBottom: "8px", color: "var(--text-primary)" }}>Approvals</h2>
-        <p class="text-secondary text-sm" style={{ lineHeight: "1.5" }}>
-          Clasper Core supports local approvals for single-operator workflows. These approvals are self-attested and not externally verifiable.
-          {" "}
-          Clasper Cloud adds trusted approvals with organizational authority, auditability, and proof.
-        </p>
-      </div>
-
       <div class="panel">
         <div class="panel-header">
-          <h3>Pending Decisions</h3>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <h3>Pending Decisions</h3>
+            <button 
+              class="btn-icon" 
+              onClick={() => setShowHelp(!showHelp)} 
+              title="Toggle help"
+              style={{ color: showHelp ? "var(--text-primary)" : "var(--text-secondary)" }}
+            >
+              <HelpCircleIcon width={20} strokeWidth={3} />
+            </button>
+          </div>
           <button class="btn-secondary btn-sm" onClick={load}>Refresh Queue</button>
         </div>
+
+        {showHelp && (
+          <div style={{ padding: "16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-subtle)" }}>
+            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: 0 }}>
+              Clasper Core supports local approvals for single-operator workflows. These approvals are self-attested and not externally verifiable. Clasper Cloud adds trusted approvals with organizational authority, auditability, and proof.
+            </p>
+          </div>
+        )}
+
         <div class="panel-list">
           {decisions === null && <div class="empty-state"><div class="spinner" /></div>}
           {decisions && !decisions.length && (

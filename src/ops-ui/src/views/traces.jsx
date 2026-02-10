@@ -4,6 +4,7 @@ import { api, buildParams } from "../api.js";
 import { copy } from "../copy.js";
 import { ExecutionBadge, RiskBadge, GovernanceBadge } from "../components/badge.jsx";
 import { RefreshIcon } from "../components/icons.jsx";
+import { TRUST_LABEL, titleCase } from "../labelColors.js";
 import { openTrace } from "../components/drawer.jsx";
 
 function getHashQuery() {
@@ -154,7 +155,7 @@ export function TracesView() {
                   </td>
                   <td class="col-outcome"><ExecutionBadge status={t.status} /></td>
                   <td><RiskBadge level={t.risk?.level} /></td>
-                  <td title="Local/self-attested">{t.trust_status || "-"}</td>
+                  <td title="Local/self-attested">{t.trust_status ? (TRUST_LABEL[t.trust_status] ?? titleCase(t.trust_status)) : "-"}</td>
                   <td class="text-right">{formatCost(t.cost)}</td>
                   <td class="text-right">{t.duration_ms || "-"}ms</td>
                 </tr>
