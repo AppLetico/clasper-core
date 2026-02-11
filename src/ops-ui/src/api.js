@@ -1,4 +1,4 @@
-import { token, user, permissions, tenantId, selectedWorkspace, authHeaders, showToast, healthStatus } from "./state.js";
+import { token, user, permissions, tenantId, selectedWorkspace, authHeaders, showToast, healthStatus, pendingApprovalsCount } from "./state.js";
 
 // --- Fetch Wrapper ---
 export async function api(path, opts = {}) {
@@ -90,6 +90,15 @@ export async function fetchWorkspaces() {
     return ws;
   } catch {
     return [];
+  }
+}
+
+export async function refreshPendingApprovalsCount() {
+  try {
+    const data = await api(`/ops/api/decisions?${buildParams({ status: "pending" })}`);
+    pendingApprovalsCount.value = (data.decisions || []).length;
+  } catch {
+    pendingApprovalsCount.value = 0;
   }
 }
 

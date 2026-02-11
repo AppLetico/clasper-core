@@ -9,7 +9,7 @@ export function DeploymentsView() {
       <div class="panel">
         <div class="panel-header">
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <h3 data-tooltip="Policy and environment deployment is a Cloud feature">Policy Promotion</h3>
+            <h3 data-tooltip="Policy promotion manages how governance rules move across environments (e.g. dev → prod) with shared authority and auditability.">Policy Promotion</h3>
             <button 
               class="btn-icon" 
               onClick={() => setShowHelp(!showHelp)} 
@@ -25,14 +25,17 @@ export function DeploymentsView() {
         {showHelp && (
           <div style={{ padding: "16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-subtle)" }}>
             <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: 0 }}>
-              Promoting and rolling back governance policy across environments is available in Clasper Cloud. Clasper Core does not support policy promotion between environments, rollback workflows, or audited policy pipelines. Use Clasper Cloud for managed promotion (e.g. dev → prod) with shared authority.
+              Policy promotion manages how governance rules move across environments (for example, dev → prod) with shared authority and auditability.
+            </p>
+            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: "8px 0 0 0" }}>
+              Clasper Core supports local policy editing and testing within a single workspace. Managed promotion, rollback workflows, and audited policy pipelines are provided by Clasper Cloud.
             </p>
           </div>
         )}
 
         <div class="panel-body">
           <p class="text-secondary text-sm" style={{ margin: 0 }}>
-            Policy promotion across environments is available in Clasper Cloud.
+            Clasper Core: local editing and testing. Clasper Cloud: managed promotion and audited policy pipelines.
           </p>
         </div>
       </div>

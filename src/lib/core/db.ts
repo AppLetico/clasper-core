@@ -213,12 +213,20 @@ export function initDatabase(): void {
       reason TEXT,
       granted_scope JSON,
       expires_at TEXT,
+      tool_group TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     );
 
     CREATE INDEX IF NOT EXISTS idx_tool_authorizations_tenant
       ON tool_authorizations(tenant_id, created_at DESC);
   `);
+
+  // Migration: add tool_group column if missing (for existing databases)
+  try {
+    db.exec(`ALTER TABLE tool_authorizations ADD COLUMN tool_group TEXT`);
+  } catch {
+    // Column already exists — ignore
+  }
 
   // Policies table - declarative governance rules
   db.exec(`

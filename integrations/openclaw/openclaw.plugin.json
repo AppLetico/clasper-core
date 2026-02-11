@@ -1,0 +1,44 @@
+{
+  "id": "clasper-openclaw",
+  "name": "Clasper Governance Plugin",
+  "version": "0.1.0",
+  "entry": "plugin.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "clasperUrl": {
+        "type": "string",
+        "description": "Clasper Core base URL (e.g. http://localhost:8081)"
+      },
+      "adapterId": {
+        "type": "string",
+        "description": "Adapter ID for registration (default: openclaw-local)"
+      },
+      "adapterSecret": {
+        "type": "string",
+        "description": "Shared secret for adapter JWT minting"
+      },
+      "approvalWaitTimeoutMs": {
+        "type": "number",
+        "description": "Max time to wait for human approval before failing closed (default: 300000)"
+      },
+      "approvalPollIntervalMs": {
+        "type": "number",
+        "description": "Polling interval while waiting for approval (default: 2000)"
+      },
+      "executionReuseWindowMs": {
+        "type": "number",
+        "description": "Window to reuse pending execution_id for same request fingerprint (default: 600000)"
+      }
+    }
+  },
+  "uiHints": {
+    "clasperUrl": { "label": "Clasper Core URL", "placeholder": "http://localhost:8081" },
+    "adapterId": { "label": "Adapter ID", "placeholder": "openclaw-local" },
+    "adapterSecret": { "label": "Adapter Secret", "sensitive": true },
+    "approvalWaitTimeoutMs": { "label": "Approval wait timeout (ms)", "placeholder": "300000" },
+    "approvalPollIntervalMs": { "label": "Approval poll interval (ms)", "placeholder": "2000" },
+    "executionReuseWindowMs": { "label": "Execution reuse window (ms)", "placeholder": "600000" }
+  }
+}

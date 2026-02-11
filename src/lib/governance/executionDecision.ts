@@ -5,8 +5,8 @@ import { calculateRiskScore } from './riskScoring.js';
 import { getBudgetManager } from './budgetManager.js';
 import type { BudgetCheckResult } from './budgetManager.js';
 import type { SkillState } from '../skills/skillRegistry.js';
-import { config } from '../core/config.js';
-import { logOverrideUsed, logApprovalAutoAllowedInCore } from './auditLog.js';
+import { config, getApprovalMode } from '../core/config.js';
+import { logOverrideUsed, logApprovalAutoAllowedInCore, logPolicyFallbackHit } from './auditLog.js';
 import type { OverrideRequest } from '../ops/overrides.js';
 import type { ExecutionDecision } from '../adapters/executionContract.js';
 import { evaluatePolicies } from '../policy/policyEngine.js';
@@ -24,6 +24,14 @@ export interface ExecutionDecisionRequest {
   estimated_cost?: number;
   tool_count: number;
   tool_names?: string[];
+  /** Specific tool being invoked (e.g. "exec", "write_file"). */
+  tool?: string;
+  /** Tool group / category (e.g. "runtime", "fs", "web"). */
+  tool_group?: string;
+  /** Skill requesting the tool invocation (e.g. "shell_agent"). */
+  skill?: string;
+  /** How the intent was derived (e.g. "heuristic"). Assistive signal only. */
+  intent_source?: string;
   skill_state?: SkillState;
   temperature?: number;
   data_sensitivity?: 'none' | 'low' | 'medium' | 'high' | 'pii';
@@ -61,6 +69,8 @@ export function evaluateExecutionDecision(
   request: ExecutionDecisionRequest
 ): ExecutionDecision {
   const executionId = request.execution_id || uuidv7();
+  const approvalMode = getApprovalMode();
+  let fallbackHit = false;
 
   if (request.rbac_allowed === false) {
     return {
@@ -68,6 +78,7 @@ export function evaluateExecutionDecision(
       execution_id: executionId,
       blocked_reason: 'rbac_denied',
       decision: 'deny',
+      policy_fallback_hit: fallbackHit,
     };
   }
 
@@ -98,6 +109,8 @@ export function evaluateExecutionDecision(
     environment: request.environment,
     adapter_id: request.adapter_id,
     adapter_risk_class: request.adapter_risk_class,
+    tool: request.tool,
+    tool_group: request.tool_group,
     skill_state: request.skill_state,
     risk_level: riskScore.level,
     estimated_cost: request.estimated_cost,
@@ -106,6 +119,30 @@ export function evaluateExecutionDecision(
     context: request.context,
     provenance: request.provenance,
   });
+
+  const matchedPolicyId =
+    policyResult.matched_policies.length === 1 ? policyResult.matched_policies[0] : undefined;
+  const matchedTrace =
+    policyResult.decision_trace.filter((entry) => entry.result === 'matched');
+  fallbackHit = Boolean(
+    matchedPolicyId &&
+      matchedTrace.length === 1 &&
+      matchedTrace[0]?.policy_id === matchedPolicyId &&
+      /fallback/i.test(matchedTrace[0]?.explanation ?? '')
+  );
+
+  if (fallbackHit && matchedPolicyId) {
+    logPolicyFallbackHit({
+      tenantId: request.tenant_id,
+      workspaceId: request.workspace_id,
+      executionId,
+      adapterId: request.adapter_id,
+      tool: request.tool,
+      toolGroup: request.tool_group,
+      policyId: matchedPolicyId,
+      decision: policyResult.decision,
+    });
+  }
 
   if (!budgetCheck.allowed && !request.override) {
     return {
@@ -116,6 +153,8 @@ export function evaluateExecutionDecision(
       matched_policies: policyResult.matched_policies,
       decision_trace: policyResult.decision_trace,
       explanation: policyResult.explanation,
+      approval_mode: approvalMode,
+      policy_fallback_hit: fallbackHit,
     };
   }
 
@@ -128,6 +167,8 @@ export function evaluateExecutionDecision(
       matched_policies: policyResult.matched_policies,
       decision_trace: policyResult.decision_trace,
       explanation: policyResult.explanation,
+      approval_mode: approvalMode,
+      policy_fallback_hit: fallbackHit,
     };
   }
 
@@ -146,8 +187,13 @@ export function evaluateExecutionDecision(
         decision: 'allow',
         matched_policies: policyResult.matched_policies,
         decision_trace: policyResult.decision_trace,
-        explanation: (policyResult.explanation || '') + ' (auto-allowed in Core; no approval UI in OSS)',
+        explanation:
+          (policyResult.explanation || '') +
+          ' (AUTO-APPROVED: approval_mode=simulate; source=config_override)',
         auto_allowed_in_core: true,
+        approval_mode: approvalMode,
+        approval_source: 'config_override',
+        policy_fallback_hit: fallbackHit,
       };
     }
     return {
@@ -160,6 +206,8 @@ export function evaluateExecutionDecision(
       decision_trace: policyResult.decision_trace,
       explanation: policyResult.explanation,
       granted_scope: buildGrantedScope(request, budgetCheck),
+      approval_mode: approvalMode,
+      policy_fallback_hit: fallbackHit,
     };
   }
 
@@ -178,8 +226,13 @@ export function evaluateExecutionDecision(
         decision: 'allow',
         matched_policies: policyResult.matched_policies,
         decision_trace: policyResult.decision_trace,
-        explanation: (policyResult.explanation || '') + ' (auto-allowed in Core; no approval UI in OSS)',
+        explanation:
+          (policyResult.explanation || '') +
+          ' (AUTO-APPROVED: approval_mode=simulate; source=config_override)',
         auto_allowed_in_core: true,
+        approval_mode: approvalMode,
+        approval_source: 'config_override',
+        policy_fallback_hit: fallbackHit,
       };
     }
     return {
@@ -192,6 +245,8 @@ export function evaluateExecutionDecision(
       decision_trace: policyResult.decision_trace,
       explanation: policyResult.explanation,
       granted_scope: buildGrantedScope(request, budgetCheck),
+      approval_mode: approvalMode,
+      policy_fallback_hit: fallbackHit,
     };
   }
 
@@ -213,6 +268,8 @@ export function evaluateExecutionDecision(
     matched_policies: policyResult.matched_policies,
     decision_trace: policyResult.decision_trace,
     explanation: policyResult.explanation,
+    approval_mode: approvalMode,
+    policy_fallback_hit: fallbackHit,
   };
 }
 

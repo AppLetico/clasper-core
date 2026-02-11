@@ -39,6 +39,8 @@ export type AuditEventType =
   | 'adapter_violation_reported'
   | 'policy_decision_pending'
   | 'policy_decision_resolved'
+  | 'policy_fallback_hit'
+  | 'policy_created_from_trace'
   | 'approval_auto_allowed_in_core';
 
 export interface AuditEntry {
@@ -338,6 +340,64 @@ export function logApprovalAutoAllowedInCore(params: {
     eventData: {
       execution_id: params.executionId,
       reason: params.reason,
+      approval_mode: 'simulate',
+      approval_source: 'config_override',
+    },
+  });
+}
+
+/**
+ * Log when an adapter hits a "fallback" policy (i.e. the only matched policy).
+ * Useful for detecting new / unscoped tool surfaces and tightening policy coverage.
+ */
+export function logPolicyFallbackHit(params: {
+  tenantId: string;
+  workspaceId?: string;
+  executionId: string;
+  adapterId: string;
+  tool?: string;
+  toolGroup?: string;
+  policyId: string;
+  decision: 'allow' | 'deny' | 'require_approval';
+}): number {
+  return auditLog('policy_fallback_hit', {
+    tenantId: params.tenantId,
+    workspaceId: params.workspaceId,
+    eventData: {
+      execution_id: params.executionId,
+      adapter_id: params.adapterId,
+      tool: params.tool ?? null,
+      tool_group: params.toolGroup ?? null,
+      policy_id: params.policyId,
+      decision: params.decision,
+    },
+  });
+}
+
+/**
+ * Log when a policy was created from the "Create policy from this trace" Ops UI flow.
+ */
+export function logPolicyCreatedFromTrace(params: {
+  tenantId: string;
+  workspaceId?: string;
+  policyId: string;
+  sourceTraceId?: string;
+  tool?: string;
+  decision: string;
+  precedence?: number;
+  adapterId?: string;
+}): number {
+  return auditLog('policy_created_from_trace', {
+    tenantId: params.tenantId,
+    workspaceId: params.workspaceId,
+    traceId: params.sourceTraceId,
+    eventData: {
+      policy_id: params.policyId,
+      source_trace_id: params.sourceTraceId ?? null,
+      tool: params.tool ?? null,
+      decision: params.decision,
+      precedence: params.precedence ?? null,
+      adapter_id: params.adapterId ?? null,
     },
   });
 }

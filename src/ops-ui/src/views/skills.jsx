@@ -75,9 +75,11 @@ export function SkillsView() {
         
         {showHelp && (
           <div style={{ padding: "16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-subtle)" }}>
-            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: 0 }}>
-              Skills are reusable capabilities registered in the workspace. Each skill has a lifecycle state: active skills are available for use, approved skills are ready for production, draft and experimental skills are in development, and deprecated skills are blocked from new invocations. Click on a skill to manage its lifecycle.
-            </p>
+            <div class="text-secondary text-sm" style={{ lineHeight: "1.5" }}>
+              <p style={{ margin: "0 0 8px 0" }}>Skills are reusable, governed bundles of execution capabilities registered in this workspace. Each skill groups one or more tools under a single authority boundary.</p>
+              <p style={{ margin: "0 0 8px 0" }}>Skills move through a lifecycle to control where and how they may be used. Draft and experimental skills are under development, active skills are available for use, approved skills are intended for production workflows, and deprecated skills are blocked from new invocations.</p>
+              <p style={{ margin: 0 }}>Clicking a skill allows you to manage its lifecycle and review the capabilities it authorizes.</p>
+            </div>
           </div>
         )}
 

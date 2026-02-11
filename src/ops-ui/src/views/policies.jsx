@@ -195,7 +195,7 @@ export function PoliciesView() {
       <div class="panel">
         <div class="panel-header">
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <h3 data-tooltip="Governance policies currently enforced across tenants and workspaces">
+            <h3 data-tooltip="Policies define pre-execution governance rules for agent actions (allow, deny, require-approval).">
               Policy Registry
             </h3>
             <button
@@ -210,7 +210,12 @@ export function PoliciesView() {
               <RefreshIcon />
             </button>
           </div>
-          <div class="text-secondary text-xs">{policies ? policies.length : 0} policies</div>
+          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+            <div class="text-secondary text-xs">{policies ? policies.length : 0} policies</div>
+            <button class="btn-primary" onClick={() => openDrawer(null)} style={{ height: "32px", fontSize: "12px", padding: "0 12px" }}>
+              + New Policy
+            </button>
+          </div>
         </div>
 
         {showHelp && (
@@ -222,48 +227,19 @@ export function PoliciesView() {
             }}
           >
             <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: 0 }}>
-              Policies define governance rules (allow, deny, require approval) for executions. Each policy has an
-              effect, optional conditions, and a scope (tenant/workspace). Click a policy to edit it, toggle
-              enable/disable, or run a dry-run test. Use <strong>New policy</strong> to create one.
+              Policies define pre-execution governance rules for agent actions, including allow, deny, and require-approval decisions.
+            </p>
+            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: "8px 0 0 0" }}>
+              Each policy specifies an effect, optional conditions, and a scope. Policies are evaluated before execution occurs.
+            </p>
+            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: "8px 0 0 0" }}>
+              Click a policy to edit it, enable or disable enforcement, or run a dry-run test against recent traces.
             </p>
           </div>
         )}
 
         <div class="panel-body p-0">
           <div class="list-group">
-            <div
-              class="detail-block card-item"
-              style={{
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: "16px",
-                background: "var(--bg-subtle)",
-                borderBottom: "1px dashed var(--border-panel)",
-              }}
-              onClick={() => openDrawer(null)}
-            >
-              <div style={{ flex: 1 }}>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "12px",
-                    marginBottom: "4px",
-                  }}
-                >
-                  <strong style={{ fontSize: "14px", color: "var(--accent-primary)" }}>+ New policy</strong>
-                </div>
-                <div class="text-secondary text-xs">Create a new governance policy</div>
-              </div>
-              <div style={{ color: "var(--text-tertiary)" }}>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polyline points="9 18 15 12 9 6" />
-                </svg>
-              </div>
-            </div>
-
             {policies === null && (
               <div class="empty-state">
                 <div class="spinner" />

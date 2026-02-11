@@ -1,12 +1,13 @@
 import { useEffect } from "preact/hooks";
 import { currentRoute, token, tenantId, selectedWorkspace, showToast } from "./state.js";
-import { fetchMe, fetchHealth, setupSSE, teardownSSE, fetchWorkspaces } from "./api.js";
+import { fetchMe, fetchHealth, setupSSE, teardownSSE, fetchWorkspaces, refreshPendingApprovalsCount } from "./api.js";
 
 import { Sidebar } from "./components/sidebar.jsx";
 import { Topbar } from "./components/topbar.jsx";
 import { TooltipProvider } from "./components/tooltip.jsx";
 import { ToastContainer } from "./components/toast.jsx";
 import { AuthModal, OverrideModal, ConfirmModal } from "./components/modal.jsx";
+import { PolicyDraftPanel } from "./components/policy-draft-panel.jsx";
 import { TraceDrawer } from "./components/drawer.jsx";
 
 import { DashboardView } from "./views/dashboard.jsx";
@@ -51,6 +52,10 @@ export function App() {
       }
       if (type === "decision.created") {
         showToast("New approval request pending", "info");
+        refreshPendingApprovalsCount();
+      }
+      if (type === "decision.resolved") {
+        refreshPendingApprovalsCount();
       }
     };
     setupSSE(onEvent);
@@ -79,6 +84,7 @@ export function App() {
 
       {/* Overlays */}
       <TraceDrawer />
+      <PolicyDraftPanel />
       <ToastContainer />
       <AuthModal />
       <OverrideModal />

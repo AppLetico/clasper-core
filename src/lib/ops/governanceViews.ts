@@ -24,6 +24,7 @@ export type GovernanceView = {
   required_role: string | null;
   expires_at: string | null;
   policy_ids: string[];
+  policy_fallback_hit: boolean;
   denied_tools: ToolDeny[];
   scope_delta: ScopeDelta;
   decision_summary: string;
@@ -67,6 +68,16 @@ function extractPolicyIdsFromDecisionSnapshot(snapshotJson: string | null): stri
     return [];
   } catch {
     return [];
+  }
+}
+
+function extractPolicyFallbackHitFromDecisionSnapshot(snapshotJson: string | null): boolean {
+  if (!snapshotJson) return false;
+  try {
+    const snap = JSON.parse(snapshotJson) as any;
+    return snap?.decision?.policy_fallback_hit === true;
+  } catch {
+    return false;
   }
 }
 
@@ -236,6 +247,7 @@ export function buildGovernanceView(params: {
     required_role: params.decisionRow?.required_role || null,
     expires_at: params.decisionRow?.expires_at || null,
     policy_ids: policyIds,
+    policy_fallback_hit: extractPolicyFallbackHitFromDecisionSnapshot(params.decisionRow?.request_snapshot || null),
     denied_tools,
     scope_delta,
     decision_summary

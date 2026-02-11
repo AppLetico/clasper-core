@@ -107,11 +107,8 @@ export function SettingsView() {
 
   return (
     <div class="content-container">
-      <div class="flex justify-between items-end mb-4">
-        <div>
-          <h2>Settings</h2>
-          <div class="text-secondary text-xs" style={{ marginTop: 4 }}>Manage your workspace preferences and defaults</div>
-        </div>
+      <div class="mb-4">
+        <h2>Settings</h2>
       </div>
 
       <div class="section-grid" style={{ alignItems: "start" }}>

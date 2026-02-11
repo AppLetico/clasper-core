@@ -1,0 +1,110 @@
+# OpenClaw Default Policy Pack for Clasper
+#
+# These policies govern OpenClaw tool invocations. They are loaded into
+# Clasper Core via `make seed-openclaw-policies` and should NOT be
+# auto-seeded from the plugin.
+#
+# Policy semantics:
+#   - Policies match on deterministic fields (tool, tool_group, capability)
+#   - Intent is assistive only — never required for matching
+#   - Higher precedence wins; deny > require_approval > allow at same level
+#
+# Tools are governed per-invocation, not pre-authorized.
+
+# --- Low-risk: allow reads ---
+- policy_id: openclaw-allow-read-file
+  subject:
+    type: tool
+    name: read
+  conditions:
+    tool: read
+    tool_group: fs
+  effect:
+    decision: allow
+  explanation: "Low-risk read operations are allowed by default."
+  precedence: 10
+  enabled: true
+
+# --- Side effects: require approval ---
+- policy_id: openclaw-require-approval-exec
+  subject:
+    type: tool
+    name: exec
+  conditions:
+    tool: exec
+    tool_group: runtime
+  effect:
+    decision: require_approval
+  explanation: "Shell execution requires operator approval before proceeding."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-write-file
+  subject:
+    type: tool
+    name: write
+  conditions:
+    tool: write
+    tool_group: fs
+  effect:
+    decision: require_approval
+  explanation: "File writes require operator approval before proceeding."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-http-request
+  subject:
+    type: tool
+    name: web_search
+  conditions:
+    tool: web_search
+    tool_group: web
+  effect:
+    decision: require_approval
+  explanation: "Web search requests require operator approval before proceeding."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-web-fetch
+  subject:
+    type: tool
+    name: web_fetch
+  conditions:
+    tool: web_fetch
+    tool_group: web
+  effect:
+    decision: require_approval
+  explanation: "Web fetch operations require operator approval before proceeding."
+  precedence: 20
+  enabled: true
+
+# --- Destructive: deny by default ---
+- policy_id: openclaw-deny-delete-file
+  subject:
+    type: tool
+    name: delete
+  conditions:
+    tool: delete
+    tool_group: fs
+  effect:
+    decision: deny
+  explanation: "File deletion is denied by default. Override with a higher-precedence policy if needed."
+  precedence: 30
+  enabled: true
+
+# --- Fallback: unknown / unscoped tools ---
+#
+# Clasper Core's policy engine defaults to allow when no policy matches.
+# OpenClaw's tool ecosystem is extensible (new tools appear as skills/plugins are added),
+# so we include an explicit fallback rule to avoid silently allowing new tool surfaces.
+#
+# This rule intentionally matches *any* tool. It is given a very low precedence so it
+# only "wins" when there is no more specific matching policy.
+- policy_id: openclaw-fallback-require-approval
+  subject:
+    type: tool
+  effect:
+    decision: require_approval
+  explanation: "Unscoped tool: fallback policy hit — requires local approval."
+  precedence: -100
+  enabled: true

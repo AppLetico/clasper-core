@@ -235,7 +235,12 @@ button, input, select, textarea { font-family: inherit; font-size: 13px; }
   font-size: 10px;
   background: var(--accent-warn);
   color: #000;
-  padding: 2px 6px;
+  height: 18px;
+  min-width: 18px;
+  padding: 0 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 99px;
   font-weight: 700;
 }

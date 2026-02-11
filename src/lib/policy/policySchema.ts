@@ -17,6 +17,8 @@ export const PolicySubjectSchema = z.object({
 export const PolicyConditionsSchema = z.object({
   adapter_risk_class: z.string().optional(),
   tool: z.string().optional(),
+  /** Tool group / category for broader matching (e.g. "runtime", "fs", "web"). */
+  tool_group: z.string().optional(),
   skill_state: z.string().optional(),
   risk_level: z.string().optional(),
   min_cost: z.number().optional(),

@@ -65,9 +65,10 @@ import { getRetentionPolicies } from "../lib/tracing/retentionPolicies.js";
 import { buildTraceDetailView, buildTraceSummaryView } from "../lib/ops/traceViews.js";
 import { loadGovernanceMaps, buildGovernanceView } from "../lib/ops/governanceViews.js";
 import { getSkillEnvironmentUsage, getSkillUsageStats, getPermissionDiff } from "../lib/ops/skillOps.js";
+import { listToolRegistry, getToolDetails } from "../lib/ops/toolOps.js";
 import { getCostDashboard, getRiskDashboard } from "../lib/ops/dashboards.js";
 // Governance
-import { getAuditLog, auditLog } from "../lib/governance/auditLog.js";
+import { getAuditLog, auditLog, logPolicyCreatedFromTrace } from "../lib/governance/auditLog.js";
 import { OverrideSchema, type OverrideRequest } from "../lib/ops/overrides.js";
 import { getBudgetManager } from "../lib/governance/budgetManager.js";
 import { calculateRiskScore, type RiskScoringInput } from "../lib/governance/riskScoring.js";
@@ -120,6 +121,8 @@ const STARTUP_BANNER = `
   🛡️  Governance & Audit
   ───────────────────────────────────────────────────────
 `;
+
+const TRACE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function buildApp() {
   const isDev = process.stdout.isTTY;
@@ -267,6 +270,10 @@ export function buildApp() {
     request.raw.on("close", () => {
       clearInterval(heartbeat);
     });
+  });
+
+  app.get("/", async (_request, reply) => {
+    return reply.redirect("/ops");
   });
 
   app.get("/ops", async (_request, reply) => {
@@ -618,6 +625,55 @@ export function buildApp() {
         return reply.status(status).send({ error: error.message, code: error.code });
       }
       return reply.status(500).send({ error: "Failed to load skills" });
+    }
+  });
+
+  app.get("/ops/api/tools/registry", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const query = request.query as { tenant_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const tools = listToolRegistry(tenantId);
+      return reply.send({ tools, total: tools.length });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load tool registry" });
+    }
+  });
+
+  app.get("/ops/api/tools/:name", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const { name } = request.params as { name: string };
+      const query = request.query as { tenant_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const history = getToolDetails(tenantId, name);
+      return reply.send({ history });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load tool details" });
     }
   });
 
@@ -1151,7 +1207,7 @@ export function buildApp() {
     max_steps: z.number().int().positive().optional(),
     max_cost: z.number().optional(),
     estimated_cost: z.number().optional(),
-    tool_count: z.number().int().nonnegative(),
+    tool_count: z.number().int().nonnegative().default(0),
     tool_names: z.array(z.string()).optional(),
     skill_state: z.enum(['draft', 'tested', 'approved', 'active', 'deprecated']).optional(),
     temperature: z.number().optional(),
@@ -1162,6 +1218,14 @@ export function buildApp() {
     rbac_allowed: z.boolean().optional(),
     callback_url: z.string().url().optional(),
     intent: z.string().optional(),
+    /** Specific tool being invoked (e.g. "exec", "write_file"). */
+    tool: z.string().optional(),
+    /** Tool group / category (e.g. "runtime", "fs", "web"). */
+    tool_group: z.string().optional(),
+    /** Skill requesting the tool invocation (e.g. "shell_agent"). */
+    skill: z.string().optional(),
+    /** How the intent was derived (e.g. "heuristic"). Assistive signal only. */
+    intent_source: z.string().optional(),
     context: z
       .object({
         external_network: z.boolean().optional(),
@@ -1350,12 +1414,73 @@ export function buildApp() {
   });
 
   /**
+   * Execution decision status endpoint (read path for approval polling).
+   *
+   * Adapters poll this to check whether a pending decision has been approved/denied.
+   * Returns the current decision effect and approval type.
+   */
+  app.get("/api/execution/:executionId", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const { executionId } = request.params as { executionId: string };
+
+      if (!executionId) {
+        return reply.status(400).send({ error: "execution_id is required" });
+      }
+
+      const decision = getLatestDecisionForExecution({
+        tenantId: adapterContext.tenantId,
+        workspaceId: adapterContext.workspaceId,
+        adapterId: adapterContext.adapterId,
+        executionId,
+      });
+
+      if (!decision) {
+        return reply.status(404).send({ error: "No decision found for this execution_id" });
+      }
+
+      // Map decision status → effect
+      let effect: string;
+      switch (decision.status) {
+        case 'approved':
+          effect = 'allow';
+          break;
+        case 'denied':
+          effect = 'deny';
+          break;
+        case 'expired':
+          effect = 'deny';
+          break;
+        case 'pending':
+        default:
+          effect = 'pending';
+          break;
+      }
+
+      return reply.send({
+        execution_id: executionId,
+        effect,
+        decision_id: decision.decision_id,
+        approval_type: 'local',
+      });
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Decision status check failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
    * Tool authorization endpoint for adapters.
    */
   const ToolAuthorizeSchema = z.object({
     execution_id: z.string(),
     adapter_id: z.string(),
     tool: z.string(),
+    tool_group: z.string().optional(),
     requested_scope: z.record(z.unknown()).optional(),
     environment: z.string().optional(),
     skill_state: z.string().optional(),
@@ -1389,6 +1514,7 @@ export function buildApp() {
         workspace_id: adapterContext.workspaceId,
         environment: parsed.data.environment,
         tool: parsed.data.tool,
+        tool_group: parsed.data.tool_group,
         adapter_id: adapterContext.adapterId,
         adapter_risk_class: parsed.data.adapter_risk_class,
         skill_state: parsed.data.skill_state,
@@ -1400,14 +1526,15 @@ export function buildApp() {
         db.prepare(
           `
           INSERT INTO tool_authorizations (
-            tenant_id, adapter_id, execution_id, tool, decision, policy_id, reason
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            tenant_id, adapter_id, execution_id, tool, tool_group, decision, policy_id, reason
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `
         ).run(
           adapterContext.tenantId,
           adapterContext.adapterId,
           parsed.data.execution_id,
           parsed.data.tool,
+          parsed.data.tool_group || null,
           policy.decision,
           policyId || null,
           policy.decision === "require_approval" ? "requires_approval" : "policy_denied"
@@ -1435,14 +1562,15 @@ export function buildApp() {
       db.prepare(
         `
         INSERT INTO tool_authorizations (
-          tenant_id, adapter_id, execution_id, tool, decision, policy_id, granted_scope, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          tenant_id, adapter_id, execution_id, tool, tool_group, decision, policy_id, granted_scope, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `
       ).run(
         adapterContext.tenantId,
         adapterContext.adapterId,
         parsed.data.execution_id,
         parsed.data.tool,
+        parsed.data.tool_group || null,
         "allow",
         policyId || null,
         JSON.stringify(parsed.data.requested_scope || {}),
@@ -1656,7 +1784,21 @@ export function buildApp() {
       const context = await requireOpsContextFromHeaders(request.headers);
       requirePermission(context, "policy:manage");
 
-      const parsed = PolicySchema.safeParse(request.body);
+      const body = request.body as Record<string, unknown>;
+      const sourceTraceId =
+        typeof body._source_trace_id === "string" && TRACE_ID_RE.test(body._source_trace_id)
+          ? body._source_trace_id
+          : undefined;
+      const sourceAdapterId =
+        typeof body._source_adapter_id === "string" && body._source_adapter_id.length > 0
+          ? body._source_adapter_id
+          : undefined;
+      const {
+        _source_trace_id: _stripSourceTraceId,
+        _source_adapter_id: _stripSourceAdapterId,
+        ...policyPayload
+      } = body;
+      const parsed = PolicySchema.safeParse(policyPayload);
       if (!parsed.success) {
         return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
       }
@@ -1667,6 +1809,18 @@ export function buildApp() {
       }
 
       const record = upsertPolicy({ tenantId, policy: parsed.data });
+      if (sourceTraceId) {
+        logPolicyCreatedFromTrace({
+          tenantId,
+          workspaceId: record.workspace_id ?? undefined,
+          policyId: record.policy_id,
+          sourceTraceId,
+          tool: record.conditions?.tool,
+          decision: record.effect?.decision ?? "",
+          precedence: record.precedence,
+          adapterId: sourceAdapterId,
+        });
+      }
       return reply.send({ policy: record });
     } catch (error) {
       if (error instanceof PermissionError) {

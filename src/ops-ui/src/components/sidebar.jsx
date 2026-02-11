@@ -1,6 +1,6 @@
 import { useState, useEffect } from "preact/hooks";
-import { currentRoute, selectedWorkspace, tenantId, user, authModalOpen } from "../state.js";
-import { fetchWorkspaces, signOut, api, buildParams } from "../api.js";
+import { currentRoute, selectedWorkspace, tenantId, user, authModalOpen, pendingApprovalsCount } from "../state.js";
+import { fetchWorkspaces, signOut, refreshPendingApprovalsCount } from "../api.js";
 import { DashboardIcon, SearchIcon, LayersIcon, DollarIcon, BoltIcon, GearIcon, ShieldIcon, ThumbsUpIcon, FileIcon, UserIcon, LockIcon, LogOutIcon, ChevronDownIcon, WrenchIcon } from "./icons.jsx";
 
 const NAV = [
@@ -10,39 +10,28 @@ const NAV = [
     { id: "deployments", label: "Deployments", icon: LayersIcon },
     { id: "cost", label: "Cost", icon: DollarIcon },
   ]},
-  { group: "Registry", items: [
-    { id: "skills", label: "Skills", icon: BoltIcon },
-    { id: "tools", label: "Tools", icon: WrenchIcon },
-    { id: "adapters", label: "Adapters", icon: GearIcon },
-  ]},
   { group: "Governance", items: [
     { id: "policies", label: "Policies", icon: ShieldIcon },
     { id: "approvals", label: "Approvals", icon: ThumbsUpIcon },
     { id: "audit", label: "Audit", icon: FileIcon },
+  ]},
+  { group: "Registry", items: [
+    { id: "skills", label: "Skills", icon: BoltIcon },
+    { id: "tools", label: "Tools", icon: WrenchIcon },
+    { id: "adapters", label: "Adapters", icon: GearIcon },
   ]},
 ];
 
 export function Sidebar() {
   const [workspaces, setWorkspaces] = useState([]);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [pendingApprovals, setPendingApprovals] = useState(0);
 
   useEffect(() => {
     fetchWorkspaces().then(setWorkspaces);
   }, [user.value?.tenant_id]);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await api(`/ops/api/decisions?${buildParams({ status: "pending" })}`);
-        const c = data.decisions?.length ?? 0;
-        if (!cancelled) setPendingApprovals(c);
-      } catch {
-        if (!cancelled) setPendingApprovals(0);
-      }
-    })();
-    return () => { cancelled = true; };
+    refreshPendingApprovalsCount();
   }, [tenantId.value, selectedWorkspace.value]);
 
   const navigate = (id) => {
@@ -77,8 +66,8 @@ export function Sidebar() {
               <a key={id} class={`nav-link ${currentRoute.value === id ? "active" : ""}`} href={`#${id}`} data-nav={id} onClick={(e) => { e.preventDefault(); navigate(id); }}>
                 <Icon class="nav-icon" />
                 {label}
-                {id === "approvals" && pendingApprovals > 0 && (
-                  <span class="nav-badge">{pendingApprovals}</span>
+                {id === "approvals" && pendingApprovalsCount.value > 0 && (
+                  <span class="nav-badge">{pendingApprovalsCount.value}</span>
                 )}
               </a>
             ))}

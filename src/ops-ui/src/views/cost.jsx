@@ -91,7 +91,7 @@ export function CostView() {
       <div class="panel">
         <div class="panel-header">
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <h3 data-tooltip="Model usage cost for governed executions">Model Usage</h3>
+            <h3 data-tooltip="Model usage shows the cost of model invocations that passed through Clasper governance.">Model Usage</h3>
             <button 
               class="btn-icon" 
               onClick={() => setShowHelp(!showHelp)} 
@@ -125,7 +125,10 @@ export function CostView() {
         {showHelp && (
           <div style={{ padding: "16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-subtle)" }}>
             <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: 0 }}>
-              Model usage cost for governed executions. Click a bar to view traces for that day.
+              Model usage shows the cost of model invocations that passed through Clasper governance.
+            </p>
+            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: "8px 0 0 0" }}>
+              Each bar represents governed executions for that day. Click a bar to view the underlying traces, decisions, and policies that authorized the usage.
             </p>
           </div>
         )}

@@ -798,31 +798,31 @@ async function run() {
     provenance: { source: "internal", publisher: "seed-script" },
   });
 
-  // Create some tool authorization events (Audit page variety)
-  console.log("[seed:ops] Generating tool authorization events...");
-  const toolExecutionId = uuidv7();
-  await authorizeTool(regA.token, {
-    tenant_id: tenantId,
-    workspace_id: workspaceId,
-    adapter_id: adapterA.adapter_id,
-    execution_id: toolExecutionId,
-    tool: "read_file",
-    requested_scope: { path: "README.md" },
-    environment: "dev",
-    skill_state: "active",
-    adapter_risk_class: adapterA.risk_class,
-  });
-  await authorizeTool(regA.token, {
-    tenant_id: tenantId,
-    workspace_id: workspaceId,
-    adapter_id: adapterA.adapter_id,
-    execution_id: toolExecutionId,
-    tool: "delete_file",
-    requested_scope: { path: "secrets.txt" },
-    environment: "dev",
-    skill_state: "active",
-    adapter_risk_class: adapterA.risk_class,
-  });
+  // Create tool authorization events so Tool Registry shows multiple tools
+  const toolsToSeed = [
+    { tool: "read_file", scope: { path: "README.md" }, adapter: regA, adapterMeta: adapterA },
+    { tool: "write_file", scope: { path: "notes/seed.md", content_preview: "Seeded" }, adapter: regA, adapterMeta: adapterA },
+    { tool: "delete_file", scope: { path: "secrets.txt" }, adapter: regA, adapterMeta: adapterA },
+    { tool: "http_request", scope: { method: "GET", url: "https://example.com/health" }, adapter: regA, adapterMeta: adapterA },
+    { tool: "run_command", scope: { cwd: "repo", command: "echo ok" }, adapter: regB, adapterMeta: adapterB },
+    { tool: "modify_database", scope: { table: "config", action: "update" }, adapter: regB, adapterMeta: adapterB },
+    { tool: "send_email", scope: { to: "ops@example.com", subject: "Seed" }, adapter: regB, adapterMeta: adapterB },
+  ];
+  console.log("[seed:ops] Seeding tool authorizations for Tool Registry...");
+  for (const { tool, scope, adapter, adapterMeta } of toolsToSeed) {
+    const execId = uuidv7();
+    await authorizeTool(adapter.token, {
+      tenant_id: tenantId,
+      workspace_id: workspaceId,
+      adapter_id: adapterMeta.adapter_id,
+      execution_id: execId,
+      tool,
+      requested_scope: scope,
+      environment: "dev",
+      skill_state: "active",
+      adapter_risk_class: adapterMeta.risk_class,
+    });
+  }
 
   // Optional: add a couple adapter audit entries for filtering
   console.log("[seed:ops] Ingesting a few audit events...");
@@ -1078,8 +1078,23 @@ async function run() {
   console.log(`[seed:ops] Open Ops UI: ${baseUrl}/ops`);
 }
 
+function isConnectionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("fetch failed") || msg.includes("ECONNREFUSED") || msg.includes("ENOTFOUND")) return true;
+  const cause = err instanceof Error && (err as { cause?: { code?: string } }).cause;
+  return cause?.code === "ECONNREFUSED" || cause?.code === "ENOTFOUND";
+}
+
 run().catch((err) => {
-  console.error("[seed:ops] Failed:", err instanceof Error ? err.message : err);
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error("[seed:ops] Failed:", msg);
+  if (isConnectionError(err)) {
+    console.error("");
+    console.error("[seed:ops] Cannot reach the server. Start it first, then run the seed.");
+    console.error("  Use CLASPER_PORT (or CLASPER_BASE_URL) so the seed matches your server port.");
+    console.error("  Example (server on 8082): CLASPER_PORT=8082 CLASPER_DB_PATH=./clasper.seed.db make dev");
+    console.error("  Then: CLASPER_PORT=8082 make reset-reseed-ops-seeded");
+  }
   process.exit(1);
 });
 

@@ -18,6 +18,7 @@
     "conformance": "tsx scripts/conformance.ts",
     "init-workspace": "tsx scripts/init-workspace.ts",
     "seed:ops": "tsx scripts/seed-ops-data.ts",
+    "seed:openclaw-policies": "tsx scripts/seed-openclaw-policies.ts",
     "cli": "tsx src/cli.ts",
     "lint": "echo \"no lint\"",
     "build:ops": "esbuild src/ops-ui/src/index.jsx --bundle --outfile=src/ops-ui/dist/app.js --format=esm --jsx=automatic --jsx-import-source=preact --minify",

@@ -6,3 +6,17 @@ services:
       - .env
     ports:
       - "8081:8081"
+
+  # ── OpenClaw integration (optional) ──────────────────────────────
+  # Uncomment when running the full integration demo.
+  # Requires the Clasper plugin installed in the OpenClaw image.
+  #
+  # openclaw:
+  #   image: openclaw/openclaw:latest
+  #   environment:
+  #     CLASPER_URL: http://clasper:8081
+  #     CLASPER_ADAPTER_ID: openclaw-local
+  #   depends_on:
+  #     - clasper
+  #   ports:
+  #     - "18789:18789"

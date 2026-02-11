@@ -94,10 +94,33 @@ export const config = {
   deepLinkDocTemplate: process.env.DEEP_LINK_DOC_TEMPLATE || "",
   deepLinkMsgTemplate: process.env.DEEP_LINK_MSG_TEMPLATE || "",
 
-  // In Core (OSS) there is no approval UI; require_approval would block the agent with no way to unblock.
-  // Default: treat require_approval as allow and audit it. Set to "block" to preserve strict blocking (agent stays stuck unless override is used).
-  requireApprovalInCore: process.env.CLASPER_REQUIRE_APPROVAL_IN_CORE === "block" ? "block" : "allow",
+  // Approval behavior in Core (OSS).
+  //
+  // OSS can enforce approvals locally (self-attested) via the Ops Console. For rapid iteration, it's also
+  // useful to *simulate* approvals by auto-allowing require_approval while emitting loud audit signals.
+  //
+  // Recommended env var: CLASPER_APPROVAL_MODE
+  //   - simulate (default): require_approval is auto-allowed + audited as AUTO-APPROVED (DEV OVERRIDE)
+  //   - enforce: require_approval blocks until an operator approves/denies in the Ops Console
+  //
+  // Back-compat env var: CLASPER_REQUIRE_APPROVAL_IN_CORE
+  //   - allow => simulate
+  //   - block => enforce
+  requireApprovalInCore:
+    process.env.CLASPER_APPROVAL_MODE === "enforce"
+      ? "block"
+      : process.env.CLASPER_APPROVAL_MODE === "simulate"
+        ? "allow"
+        : process.env.CLASPER_REQUIRE_APPROVAL_IN_CORE === "block"
+          ? "block"
+          : "allow",
 };
+
+export type ApprovalMode = "simulate" | "enforce";
+
+export function getApprovalMode(): ApprovalMode {
+  return config.requireApprovalInCore === "block" ? "enforce" : "simulate";
+}
 
 export function requireEnv(name: string, value: string) {
   if (!value) {

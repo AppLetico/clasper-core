@@ -66,7 +66,7 @@ export function AuditView() {
       <div class="panel full-height">
         <div class="panel-header">
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <h3 data-tooltip="Chronological log of all recorded events">Audit Log</h3>
+            <h3 data-tooltip="Records governance decisions, execution events, and system activity observed by Clasper Core.">Audit Log</h3>
             <button 
               class="btn-icon" 
               onClick={() => setShowHelp(!showHelp)} 
@@ -84,7 +84,13 @@ export function AuditView() {
         {showHelp && (
           <div style={{ padding: "16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-subtle)" }}>
             <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: 0 }}>
-              Local, self-attested record of system events and governance decisions. Clasper Core produces self-attested logs only (no external proof).
+              The audit log records governance decisions, execution events, and system activity observed by Clasper Core.
+            </p>
+            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: "8px 0 0 0" }}>
+              These records are self-attested and intended for local inspection, debugging, and internal review.
+            </p>
+            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: "8px 0 0 0" }}>
+              Externally verifiable audit records, signed evidence, and long-term retention are provided by Clasper Cloud.
             </p>
           </div>
         )}

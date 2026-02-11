@@ -6,6 +6,8 @@ export interface PolicyContext {
   workspace_id?: string;
   environment?: string;
   tool?: string;
+  /** Tool group / category (e.g. "runtime", "fs", "web"). */
+  tool_group?: string;
   adapter_id?: string;
   adapter_risk_class?: string;
   skill_state?: string;
@@ -75,6 +77,7 @@ function conditionsMatch(policy: PolicyObject, ctx: PolicyContext): boolean {
   if (conditions.adapter_risk_class && conditions.adapter_risk_class !== ctx.adapter_risk_class)
     return false;
   if (conditions.tool && conditions.tool !== ctx.tool) return false;
+  if (conditions.tool_group && conditions.tool_group !== ctx.tool_group) return false;
   if (conditions.skill_state && conditions.skill_state !== ctx.skill_state) return false;
   if (conditions.risk_level && conditions.risk_level !== ctx.risk_level) return false;
   if (conditions.tenant_id && conditions.tenant_id !== ctx.tenant_id) return false;

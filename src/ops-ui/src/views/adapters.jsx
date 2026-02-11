@@ -53,9 +53,11 @@ export function AdaptersView() {
 
         {showHelp && (
           <div style={{ padding: "16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-subtle)" }}>
-            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: 0 }}>
-              Adapters are external runtimes that send telemetry (traces, audit, cost) to this control plane. They register when they connect; the list below shows all adapters currently known to Core. Click an adapter to see details. Adapter signing keys and external proof are Cloud-only—Clasper Core records self-attested telemetry only.
-            </p>
+            <div class="text-secondary text-sm" style={{ lineHeight: "1.5" }}>
+              <p style={{ margin: "0 0 8px 0" }}>Adapters are external runtimes that execute actions and report telemetry (traces, decisions, cost) to this control plane.</p>
+              <p style={{ margin: "0 0 8px 0" }}>Adapters register automatically when they connect. The list below shows all adapters currently known to Clasper Core.</p>
+              <p style={{ margin: 0 }}>Telemetry recorded by Clasper Core is self-attested. Trusted adapter identities, signing keys, and externally verifiable proof are provided by Clasper Cloud.</p>
+            </div>
           </div>
         )}
 

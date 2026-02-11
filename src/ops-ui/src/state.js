@@ -56,11 +56,14 @@ export function showToast(message, type = "info") {
 
 // --- Health ---
 export const healthStatus = signal({ ok: null, text: "Checking...", components: {} });
+export const pendingApprovalsCount = signal(0);
 
 // --- Modals ---
 export const authModalOpen = signal(false);
 export const overrideModal = signal({ open: false, callback: null, message: "" });
 export const confirmModal = signal({ open: false, title: "", message: "", callback: null });
+/** { open: boolean, trace: object | null } — for "Create policy from this trace" draft panel */
+export const policyDraftPanel = signal({ open: false, trace: null });
 
 // --- Helpers ---
 export function formatCost(cost) {

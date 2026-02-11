@@ -2,9 +2,16 @@ import { signal } from "@preact/signals";
 import { useEffect, useState } from "preact/hooks";
 import { XIcon } from "./icons.jsx";
 import { ExecutionBadge, GovernanceBadge } from "./badge.jsx";
-import { formatCost, tenantId } from "../state.js";
+import { formatCost, tenantId, policyDraftPanel, hasPermission } from "../state.js";
 import { TRUST_LABEL, titleCase } from "../labelColors.js";
 import { api, buildParams } from "../api.js";
+
+function isFallbackOnlyTrace(trace) {
+  const gov = trace.governance || {};
+  const isDeniedOrPending = ["deny", "pending_approval", "require_approval"].includes(gov.decision);
+  const hasTools = (trace.tool_names || []).length > 0;
+  return isDeniedOrPending && gov.policy_fallback_hit === true && hasTools;
+}
 
 export const drawerOpen = signal(false);
 export const drawerTraceId = signal(null);
@@ -178,6 +185,23 @@ function TraceDetailContent({ trace }) {
                 ))}
               </div>
             )}
+          </div>
+        </>
+      )}
+
+      {isFallbackOnlyTrace(trace) && hasPermission("policy:manage") && (
+        <>
+          <div class="drawer-section-header">No governing policy</div>
+          <div class="detail-block" style={{ borderLeft: "3px solid var(--accent-warn)", background: "var(--bg-subtle)" }}>
+            <p class="text-secondary" style={{ fontSize: "13px", margin: "0 0 12px 0" }}>
+              No governing policy matched this tool. Only the fallback rule applied.
+            </p>
+            <button
+              class="btn-primary btn-sm"
+              onClick={() => { policyDraftPanel.value = { open: true, trace }; }}
+            >
+              Create policy from this trace
+            </button>
           </div>
         </>
       )}

@@ -9,6 +9,14 @@ export interface ExecutionRequest {
   requested_capabilities: string[];
   estimated_cost?: number;
   intent?: string;
+  /** Specific tool being invoked (e.g. "exec", "write_file"). */
+  tool?: string;
+  /** Tool group / category (e.g. "runtime", "fs", "web"). */
+  tool_group?: string;
+  /** Skill requesting the tool invocation (e.g. "shell_agent"). */
+  skill?: string;
+  /** How the intent was derived (e.g. "heuristic"). Assistive signal only. */
+  intent_source?: string;
   context?: ExecutionContext;
   provenance?: ExecutionProvenance;
 }
@@ -22,6 +30,14 @@ export const ExecutionRequestSchema = z.object({
   requested_capabilities: z.array(z.string()),
   estimated_cost: z.number().optional(),
   intent: z.string().optional(),
+  /** Specific tool being invoked (e.g. "exec", "write_file"). */
+  tool: z.string().optional(),
+  /** Tool group / category (e.g. "runtime", "fs", "web"). */
+  tool_group: z.string().optional(),
+  /** Skill requesting the tool invocation (e.g. "shell_agent"). */
+  skill: z.string().optional(),
+  /** How the intent was derived (e.g. "heuristic"). Assistive signal only. */
+  intent_source: z.string().optional(),
   context: z
     .object({
       external_network: z.boolean().optional(),
@@ -79,6 +95,8 @@ export interface ExecutionDecision {
   expires_at?: string;
   required_role?: string;
   matched_policies?: string[];
+  /** True when the only matched policy was a fallback rule. */
+  policy_fallback_hit?: boolean;
   decision_trace?: {
     policy_id: string;
     result: 'matched' | 'skipped';
@@ -86,7 +104,18 @@ export interface ExecutionDecision {
     explanation?: string;
   }[];
   explanation?: string;
-  /** Set when Core (OSS) auto-allowed an execution that would otherwise require approval (no approval UI in OSS). */
+  /**
+   * The approval handling mode in Core:
+   * - simulate: require_approval is auto-allowed (DEV OVERRIDE) with loud audit signals
+   * - enforce: require_approval blocks until an operator approves/denies (local, self-attested)
+   */
+  approval_mode?: 'simulate' | 'enforce';
+  /**
+   * If approval was simulated, indicates where that auto-allow came from.
+   * Intended for UI/audit guardrails so users don't mistake simulation for enforcement.
+   */
+  approval_source?: 'config_override';
+  /** Set when Core (OSS) auto-allowed an execution that would otherwise require approval. */
   auto_allowed_in_core?: boolean;
 }
 
@@ -101,6 +130,7 @@ export const ExecutionDecisionSchema = z.object({
   expires_at: z.string().optional(),
   required_role: z.string().optional(),
   matched_policies: z.array(z.string()).optional(),
+  policy_fallback_hit: z.boolean().optional(),
   decision_trace: z
     .array(
       z.object({
@@ -112,5 +142,7 @@ export const ExecutionDecisionSchema = z.object({
     )
     .optional(),
   explanation: z.string().optional(),
+  approval_mode: z.enum(['simulate', 'enforce']).optional(),
+  approval_source: z.enum(['config_override']).optional(),
   auto_allowed_in_core: z.boolean().optional(),
 });
