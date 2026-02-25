@@ -99,7 +99,9 @@ export function TracesView() {
             <button class="btn-ghost btn-sm" onClick={() => { reset(); load(); }}>Reset</button>
           </div>
           <div class="toolbar-group">
-            <button class="btn-icon" onClick={handleRefresh} title="Refresh"><RefreshIcon /></button>
+            <button class="btn-secondary btn-sm" onClick={handleRefresh} title="Refresh">
+              <RefreshIcon width={14} /> Refresh
+            </button>
           </div>
         </div>
 

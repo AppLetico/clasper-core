@@ -77,7 +77,7 @@ export function createGovernedDispatch(
       toolName: normalizedTool.name,
       context: context as Record<string, unknown>,
       params: args,
-      mappedTargets: toolContext.targets,
+      mappedTargets: Array.isArray(toolContext.targets) ? toolContext.targets : toolContext.targets?.paths,
     });
     const nowMs = Date.now();
     const reusedExecutionId = getReusableExecutionId(
@@ -106,6 +106,11 @@ export function createGovernedDispatch(
         intent: inferIntent(normalizedTool, args),
         intent_source: 'heuristic',
         context: toolContext,
+        templateVars: {
+          'workspace.root':
+            (typeof args.cwd === 'string' && args.cwd.trim().length > 0 ? args.cwd : process.cwd()) ||
+            process.cwd(),
+        },
       });
     } catch (err) {
       // Fail closed: Clasper unreachable → block execution
@@ -150,6 +155,21 @@ export function createGovernedDispatch(
       case 'pending': {
         if (!reusedExecutionId) {
           setReusableExecutionId(inFlightByFingerprint, fingerprint, executionId, nowMs);
+          await client.ingestAudit({
+            tenant_id: tenantId,
+            workspace_id: workspaceId,
+            execution_id: executionId,
+            trace_id: traceId,
+            adapter_id: adapterId,
+            event_type: 'approval_grant_created',
+            message: `Approval grant window opened for "${normalizedTool.name}"`,
+            event_data: {
+              tool: normalizedTool.name,
+              execution_reused: false,
+              execution_id: executionId,
+            },
+            occurred_at: new Date().toISOString(),
+          });
         }
         if (reusedExecutionId) {
           await client.ingestAudit({
@@ -158,8 +178,8 @@ export function createGovernedDispatch(
             execution_id: executionId,
             trace_id: traceId,
             adapter_id: adapterId,
-            event_type: 'approval_pending_reused',
-            message: `Reused pending approval for "${normalizedTool.name}"`,
+            event_type: 'approval_grant_consumed',
+            message: `Approval reused via grant window for "${normalizedTool.name}"`,
             event_data: {
               tool: normalizedTool.name,
               execution_reused: true,

@@ -8,7 +8,7 @@ export {
   type ConversationMessage,
   type TokenUsage,
   type CostBreakdown,
-  type WombatStreamEvent,
+  type ClasperStreamEvent,
 } from './llmProvider.js';
 
 // OpenAI Client - backward compatible wrapper

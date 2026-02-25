@@ -12,76 +12,24 @@
 
 ### Installing OpenClaw
 
-There are several ways to install OpenClaw. Pick whichever fits your workflow.
-Full details: [docs.openclaw.ai/install](https://docs.openclaw.ai/install)
+Use the official installer (primary path):
 
-#### Option 1: Installer script (recommended)
-
-The installer handles Node detection, installation, and onboarding in one step.
-
-**macOS / Linux / WSL2:**
+**macOS / Linux / WSL2**
 
 ```bash
 curl -fsSL https://openclaw.ai/install.sh | bash
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell)**
 
 ```powershell
 iwr -useb https://openclaw.ai/install.ps1 | iex
 ```
 
-To skip onboarding and just install the binary, pass `--no-onboard`:
+For alternate install methods and the latest onboarding guidance, see OpenClaw's
+official Getting Started docs:
 
-```bash
-curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-```
-
-#### Option 2: npm / pnpm
-
-If you already have Node 22+ and prefer to manage the install yourself:
-
-**npm:**
-
-```bash
-npm install -g openclaw@latest
-openclaw onboard --install-daemon
-```
-
-**pnpm:**
-
-```bash
-pnpm add -g openclaw@latest
-pnpm approve-builds -g          # approve openclaw, sharp, etc.
-openclaw onboard --install-daemon
-```
-
-> **Note:** If `sharp` fails during install on macOS (common when libvips is
-> installed via Homebrew), force prebuilt binaries:
-> `SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g openclaw@latest`
-
-#### Option 3: From source
-
-For contributors or anyone who wants to run from a local checkout:
-
-```bash
-git clone https://github.com/openclaw/openclaw.git
-cd openclaw
-pnpm install
-pnpm ui:build
-pnpm build
-pnpm link --global
-openclaw onboard --install-daemon
-```
-
-#### Other install methods
-
-| Method | Use case | Docs |
-|--------|----------|------|
-| Docker | Containerized / headless deployments | [docs.openclaw.ai/install/docker](https://docs.openclaw.ai/install/docker) |
-| Nix | Declarative install via Nix | [docs.openclaw.ai/install/nix](https://docs.openclaw.ai/install/nix) |
-| Ansible | Automated fleet provisioning | [docs.openclaw.ai/install/ansible](https://docs.openclaw.ai/install/ansible) |
-| Bun | CLI-only usage via the Bun runtime (experimental) | [docs.openclaw.ai/install/bun](https://docs.openclaw.ai/install/bun) |
+- [https://docs.openclaw.ai/start/getting-started](https://docs.openclaw.ai/start/getting-started)
 
 #### Verify the install
 
@@ -90,18 +38,6 @@ openclaw doctor     # check for config issues
 openclaw status     # gateway status
 openclaw dashboard  # open the browser UI
 ```
-
-#### Troubleshooting: `openclaw` not found
-
-If your shell can't find the `openclaw` command after installing via npm, the
-global bin directory probably isn't in your PATH. Add it to `~/.zshrc` or
-`~/.bashrc`:
-
-```bash
-export PATH="$(npm prefix -g)/bin:$PATH"
-```
-
-Then open a new terminal (or run `rehash` in zsh / `hash -r` in bash).
 
 ### Onboarding: Skill Selection
 
@@ -214,6 +150,12 @@ npm run build
 npx clasper-core setup --profile openclaw
 ```
 
+Upgrade/sync an existing OpenClaw plugin install later:
+
+```bash
+npx clasper-core setup --profile openclaw --upgrade-openclaw-plugin --non-interactive
+```
+
 Optional (global command install):
 
 ```bash
@@ -284,6 +226,10 @@ OPS_LOCAL_API_KEY=
 # Recommended config:
 CLASPER_APPROVAL_MODE=enforce
 #
+# Enable advanced deterministic policy operators used by exception rules
+# (in, prefix, all_under, any_under, exists).
+CLASPER_POLICY_OPERATORS=true
+#
 # Back-compat (older config, still supported):
 #   CLASPER_REQUIRE_APPROVAL_IN_CORE=allow  → simulate
 #   CLASPER_REQUIRE_APPROVAL_IN_CORE=block  → enforce
@@ -344,9 +290,10 @@ This reads `integrations/openclaw/policies/openclaw-default.yaml` and POSTs each
 policy to the Ops API. You should see output like:
 
 ```
-  Found 7 policies to seed.
+  Found 8 policies to seed.
 
   ✓ openclaw-allow-read-file → allow
+  ✓ openclaw-allow-safe-shell-reads → allow
   ✓ openclaw-require-approval-exec → require_approval
   ✓ openclaw-require-approval-write-file → require_approval
   ✓ openclaw-require-approval-http-request → require_approval
@@ -363,7 +310,8 @@ the seed script sends (or leave it blank to disable Ops auth).
 | Tool | Effect | Why |
 |------|--------|-----|
 | `read` | allow | Low-risk baseline |
-| `exec` | require_approval | Shell commands need operator review |
+| `exec` (`ls`/`pwd`/`whoami` under workspace root) | allow | Safe read-only shell commands in scoped paths |
+| `exec` (all other commands) | require_approval | Shell commands need operator review |
 | `write` | require_approval | File mutations need operator review |
 | `web_search` | require_approval | Network access needs operator review |
 | `web_fetch` | require_approval | Network access needs operator review |
@@ -526,7 +474,7 @@ Then check Clasper logs for `POST /api/execution/request` and the Ops Console **
 Open [http://localhost:8081/](http://localhost:8081/) and check:
 
 - **Adapters** — `openclaw-local` should appear with `risk_class: high`
-- **Policies** — All 7 OpenClaw policies listed and enabled
+- **Policies** — All 8 OpenClaw policies listed and enabled
 - **Audit** — Events for blocked, approved, and executed tool invocations
 - **Approvals** — Pending decisions (when `CLASPER_REQUIRE_APPROVAL_IN_CORE=block`)
 - **Tools** — Tool names with allow/block rates derived from actual decisions
@@ -542,28 +490,32 @@ Edit `policies/openclaw-default.yaml` and re-seed:
 make seed-openclaw-policies
 ```
 
-**Example: allow exec for npm install only**
+**Example: allow deterministic safe shell reads**
 
-Add a higher-precedence policy that allows exec when the intent is `install_dependencies`:
+Add a higher-precedence policy that allows specific commands only when all target
+paths stay under workspace root:
 
 ```yaml
-- policy_id: openclaw-allow-npm-install
+- policy_id: openclaw-allow-safe-shell-reads-local
   subject:
     type: tool
-    name: exec
   conditions:
     tool: exec
-    intent: install_dependencies
+    tool_group: runtime
+    context.exec.argv0:
+      in: ["ls", "pwd", "whoami"]
+    context.targets.paths:
+      all_under:
+        - "{{workspace.root}}"
   effect:
     decision: allow
-  explanation: "npm install is pre-approved."
-  precedence: 25
+  explanation: "Allow safe shell reads within workspace root."
+  precedence: 30
   enabled: true
 ```
 
-> Note: intent is heuristically inferred (`intent_source: "heuristic"`) and should
-> be treated as an assistive signal. For production use, match on deterministic
-> fields (tool, tool_group, capability) whenever possible.
+> Tip: prefer deterministic fields (`tool`, `tool_group`,
+> `context.exec.argv0`, `context.targets.paths`) over heuristic intent matching.
 
 ---
 
@@ -631,7 +583,7 @@ integrations/openclaw/
 │   ├── telemetry.ts              # Outcome reporting (audit + cost)
 │   └── approval.ts               # Approval polling loop
 ├── policies/
-│   └── openclaw-default.yaml     # Default governance policies (6 rules)
+│   └── openclaw-default.yaml     # Default governance policies (8 rules)
 ├── demos/
 │   ├── demo.sh                   # Automated demo runner
 │   └── malicious-skill.ts        # Adversarial test scenarios

@@ -41,7 +41,33 @@ export type AuditEventType =
   | 'policy_decision_resolved'
   | 'policy_fallback_hit'
   | 'policy_created_from_trace'
+  | 'policy_created_via_wizard'
+  | 'policy_updated_via_wizard'
+  | 'policy_exception_hit'
+  | 'policy_exception_miss'
+  | 'approval_grant_created'
+  | 'approval_grant_consumed'
   | 'approval_auto_allowed_in_core';
+
+export interface WizardAuditMeta {
+  wizard_meta_version: number;
+  created_via_wizard: boolean;
+  selected_outcome: "allow" | "require_approval" | "deny";
+  scope_choice: "workspace" | "custom_path_scope" | "global";
+  command_match_choice: "single" | "list" | "none";
+  warnings_shown: string[];
+  wizard_acknowledged_allow: boolean;
+  wizard_meta_invalid: boolean;
+  wizard_meta_attested: boolean;
+  attested_by: "core";
+  attested_at: string;
+  actor_user_id: string | null;
+  tenant_id: string;
+  workspace_id: string | null;
+  edited_via_wizard?: boolean;
+  last_edited_at?: string;
+  last_edited_by?: string | null;
+}
 
 export interface AuditEntry {
   id: number;
@@ -386,6 +412,9 @@ export function logPolicyCreatedFromTrace(params: {
   decision: string;
   precedence?: number;
   adapterId?: string;
+  wizardMeta?: WizardAuditMeta;
+  policySummary?: Record<string, unknown>;
+  wizardMetaHash?: string;
 }): number {
   return auditLog('policy_created_from_trace', {
     tenantId: params.tenantId,
@@ -398,6 +427,159 @@ export function logPolicyCreatedFromTrace(params: {
       decision: params.decision,
       precedence: params.precedence ?? null,
       adapter_id: params.adapterId ?? null,
+      wizard_meta: params.wizardMeta ?? null,
+      policy_summary: params.policySummary ?? null,
+      wizard_meta_hash: params.wizardMetaHash ?? null,
+    },
+  });
+}
+
+export function logPolicyCreatedViaWizard(params: {
+  tenantId: string;
+  workspaceId?: string;
+  sourceTraceId?: string;
+  policyId: string;
+  tool?: string;
+  decision: string;
+  precedence?: number;
+  adapterId?: string;
+  wizardMeta: WizardAuditMeta;
+  policySummary?: Record<string, unknown>;
+  wizardMetaHash?: string;
+}): number {
+  return auditLog('policy_created_via_wizard', {
+    tenantId: params.tenantId,
+    workspaceId: params.workspaceId,
+    traceId: params.sourceTraceId,
+    eventData: {
+      policy_id: params.policyId,
+      source_trace_id: params.sourceTraceId ?? null,
+      tool: params.tool ?? null,
+      decision: params.decision,
+      precedence: params.precedence ?? null,
+      adapter_id: params.adapterId ?? null,
+      wizard_meta: params.wizardMeta,
+      policy_summary: params.policySummary ?? null,
+      wizard_meta_hash: params.wizardMetaHash ?? null,
+      attested_by: "core",
+    },
+  });
+}
+
+export function logPolicyUpdatedViaWizard(params: {
+  tenantId: string;
+  workspaceId?: string;
+  sourceTraceId?: string;
+  policyId: string;
+  tool?: string;
+  decision: string;
+  precedence?: number;
+  adapterId?: string;
+  actorUserId?: string;
+  wizardMeta: WizardAuditMeta;
+  wizardMetaHash?: string;
+  policySummaryBefore?: Record<string, unknown>;
+  policySummaryAfter?: Record<string, unknown>;
+  policySummaryBeforeHash?: string;
+  policySummaryAfterHash?: string;
+  diffHint?: string[];
+}): number {
+  return auditLog('policy_updated_via_wizard', {
+    tenantId: params.tenantId,
+    workspaceId: params.workspaceId,
+    traceId: params.sourceTraceId,
+    userId: params.actorUserId,
+    eventData: {
+      policy_id: params.policyId,
+      source_trace_id: params.sourceTraceId ?? null,
+      tool: params.tool ?? null,
+      decision: params.decision,
+      precedence: params.precedence ?? null,
+      adapter_id: params.adapterId ?? null,
+      wizard_meta: params.wizardMeta,
+      wizard_meta_hash: params.wizardMetaHash ?? null,
+      policy_summary_before: params.policySummaryBefore ?? null,
+      policy_summary_after: params.policySummaryAfter ?? null,
+      policy_summary_before_hash: params.policySummaryBeforeHash ?? null,
+      policy_summary_after_hash: params.policySummaryAfterHash ?? null,
+      diff_hint: params.diffHint ?? [],
+      attested_by: "core",
+    },
+  });
+}
+
+export function logPolicyExceptionHit(params: {
+  tenantId: string;
+  workspaceId?: string;
+  executionId: string;
+  policyId: string;
+  operator?: string;
+  contextSnapshot?: Record<string, unknown>;
+}): number {
+  return auditLog('policy_exception_hit', {
+    tenantId: params.tenantId,
+    workspaceId: params.workspaceId,
+    eventData: {
+      execution_id: params.executionId,
+      policy_id: params.policyId,
+      operator: params.operator ?? null,
+      context_snapshot: params.contextSnapshot ?? {},
+    },
+  });
+}
+
+export function logPolicyExceptionMiss(params: {
+  tenantId: string;
+  workspaceId?: string;
+  executionId: string;
+  policyId: string;
+  operator?: string;
+  contextSnapshot?: Record<string, unknown>;
+}): number {
+  return auditLog('policy_exception_miss', {
+    tenantId: params.tenantId,
+    workspaceId: params.workspaceId,
+    eventData: {
+      execution_id: params.executionId,
+      policy_id: params.policyId,
+      operator: params.operator ?? null,
+      context_snapshot: params.contextSnapshot ?? {},
+    },
+  });
+}
+
+export function logApprovalGrantCreated(params: {
+  tenantId: string;
+  workspaceId?: string;
+  executionId: string;
+  policyId?: string;
+  contextSnapshot?: Record<string, unknown>;
+}): number {
+  return auditLog('approval_grant_created', {
+    tenantId: params.tenantId,
+    workspaceId: params.workspaceId,
+    eventData: {
+      execution_id: params.executionId,
+      policy_id: params.policyId ?? null,
+      context_snapshot: params.contextSnapshot ?? {},
+    },
+  });
+}
+
+export function logApprovalGrantConsumed(params: {
+  tenantId: string;
+  workspaceId?: string;
+  executionId: string;
+  policyId?: string;
+  contextSnapshot?: Record<string, unknown>;
+}): number {
+  return auditLog('approval_grant_consumed', {
+    tenantId: params.tenantId,
+    workspaceId: params.workspaceId,
+    eventData: {
+      execution_id: params.executionId,
+      policy_id: params.policyId ?? null,
+      context_snapshot: params.contextSnapshot ?? {},
     },
   });
 }

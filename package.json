@@ -5,6 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
+    "clasper": "dist/cli.js",
     "clasper-core": "dist/cli.js"
   },
   "scripts": {
@@ -19,6 +20,7 @@
     "init-workspace": "tsx scripts/init-workspace.ts",
     "seed:ops": "tsx scripts/seed-ops-data.ts",
     "seed:openclaw-policies": "tsx scripts/seed-openclaw-policies.ts",
+    "patch:exception-link": "tsx scripts/patch-exception-link.ts",
     "cli": "tsx src/cli.ts",
     "lint": "echo \"no lint\"",
     "build:ops": "esbuild src/ops-ui/src/index.jsx --bundle --outfile=src/ops-ui/dist/app.js --format=esm --jsx=automatic --jsx-import-source=preact --minify",
@@ -36,18 +38,19 @@
     "jose": "^5.6.3",
     "preact": "^10.28.3",
     "tar": "^7.5.7",
+    "tippy.js": "^6.3.7",
     "uuid": "^11.0.5",
     "yaml": "^2.7.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
-    "png-to-ico": "^3.0.1",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^20.12.12",
     "@types/uuid": "^10.0.0",
     "esbuild": "^0.27.3",
     "pino-pretty": "^13.1.3",
+    "png-to-ico": "^3.0.1",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.5"

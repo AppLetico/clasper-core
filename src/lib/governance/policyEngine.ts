@@ -11,6 +11,13 @@ export interface PolicyEvaluation {
     result: 'matched' | 'skipped';
     decision?: PolicyDecision;
     explanation?: string;
+    condition_details?: {
+      field: string;
+      operator: string;
+      expected: unknown;
+      actual: unknown;
+      result: boolean;
+    }[];
   }[];
   explanation?: string;
 }

@@ -55,15 +55,25 @@ export function showToast(message, type = "info") {
 }
 
 // --- Health ---
-export const healthStatus = signal({ ok: null, text: "Checking...", components: {} });
+export const healthStatus = signal({ ok: null, text: "Checking...", components: {}, config: {} });
 export const pendingApprovalsCount = signal(0);
 
 // --- Modals ---
 export const authModalOpen = signal(false);
 export const overrideModal = signal({ open: false, callback: null, message: "" });
 export const confirmModal = signal({ open: false, title: "", message: "", callback: null });
-/** { open: boolean, trace: object | null } — for "Create policy from this trace" draft panel */
-export const policyDraftPanel = signal({ open: false, trace: null });
+/**
+ * Policy draft panel state.
+ * - create mode: { open: true, mode: "create", trace }
+ * - edit mode:   { open: true, mode: "edit", policy }
+ */
+export const policyDraftPanel = signal({ open: false, mode: "create", trace: null, policy: null });
+export const policyExceptionResolution = signal({
+  updatedAt: 0,
+  decisionIds: [],
+  sourceTraceId: null,
+  resolvedCount: 0,
+});
 
 // --- Helpers ---
 export function formatCost(cost) {

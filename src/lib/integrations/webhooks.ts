@@ -52,14 +52,14 @@ export async function sendWebhook(
   try {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
-      "User-Agent": "Wombat-Webhook/1.0",
+      "User-Agent": "Clasper-Webhook/1.0",
       ...webhookConfig.headers
     };
 
     // Add signature if secret is provided
     if (webhookConfig.secret) {
       const signature = await signPayload(JSON.stringify(payload), webhookConfig.secret);
-      headers["X-Wombat-Signature"] = signature;
+      headers["X-Clasper-Signature"] = signature;
     }
 
     const controller = new AbortController();

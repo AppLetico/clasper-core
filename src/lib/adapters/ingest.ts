@@ -62,6 +62,7 @@ export function ingestTrace(payload: unknown): IngestResult {
     tenantId: parsed.tenant_id,
     workspaceId: parsed.workspace_id,
     traceId: parsed.trace_id,
+    userId: `adapter:${parsed.adapter_id}`,
     eventData: {
       adapter_id: parsed.adapter_id,
       execution_id: parsed.execution_id,
@@ -97,6 +98,7 @@ export function ingestCost(payload: unknown): IngestResult {
     tenantId: parsed.tenant_id,
     workspaceId: parsed.workspace_id,
     traceId: parsed.trace_id,
+    userId: `adapter:${parsed.adapter_id}`,
     eventData: {
       adapter_id: parsed.adapter_id,
       execution_id: parsed.execution_id,
@@ -122,6 +124,7 @@ export function ingestMetrics(payload: unknown): IngestResult {
     tenantId: parsed.tenant_id,
     workspaceId: parsed.workspace_id,
     traceId: parsed.trace_id,
+    userId: `adapter:${parsed.adapter_id}`,
     eventData: {
       adapter_id: parsed.adapter_id,
       execution_id: parsed.execution_id,
@@ -144,6 +147,7 @@ export function ingestViolation(payload: unknown): IngestResult {
     tenantId: parsed.tenant_id,
     workspaceId: parsed.workspace_id,
     traceId: parsed.trace_id,
+    userId: `adapter:${parsed.adapter_id}`,
     eventData: {
       adapter_id: parsed.adapter_id,
       execution_id: parsed.execution_id,
@@ -162,6 +166,7 @@ function writeAdapterAudit(event: AuditEventIngest): void {
     tenantId: event.tenant_id,
     workspaceId: event.workspace_id,
     traceId: event.trace_id,
+    userId: `adapter:${event.adapter_id}`,
     eventData: {
       adapter_id: event.adapter_id,
       execution_id: event.execution_id,

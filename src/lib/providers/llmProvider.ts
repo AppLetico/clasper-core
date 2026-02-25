@@ -64,7 +64,7 @@ export type StreamEventType = "start" | "chunk" | "done" | "error";
 /**
  * Streaming event payload.
  */
-export interface WombatStreamEvent {
+export interface ClasperStreamEvent {
   type: StreamEventType;
   data?: string;
   usage?: TokenUsage;
@@ -383,7 +383,7 @@ export async function* llmStream(params: {
   userMessage: string;
   model?: string;
   temperature?: number;
-}): AsyncGenerator<WombatStreamEvent> {
+}): AsyncGenerator<ClasperStreamEvent> {
   const {
     systemPrompt,
     messages,

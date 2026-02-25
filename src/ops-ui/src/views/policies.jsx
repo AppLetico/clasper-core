@@ -1,8 +1,8 @@
 import { useEffect, useState } from "preact/hooks";
-import { tenantId, selectedWorkspace, showToast } from "../state.js";
+import { tenantId, selectedWorkspace, showToast, policyDraftPanel } from "../state.js";
 import { api, buildParams, apiPost, apiPatch, apiDelete } from "../api.js";
 import { Badge } from "../components/badge.jsx";
-import { RefreshIcon, XIcon, HelpCircleIcon, ShieldIcon, LockIcon, ThumbsUpIcon } from "../components/icons.jsx";
+import { RefreshIcon, XIcon, ShieldIcon, LockIcon, ThumbsUpIcon } from "../components/icons.jsx";
 
 /** Build the policy payload for POST (no tenant_id at top level; scope.tenant_id is used). */
 function policyToEditPayload(p) {
@@ -31,18 +31,47 @@ function policyToEditPayload(p) {
   };
 }
 
+function isWizardCreatedAttested(policy) {
+  const meta = policy?._wizard_meta;
+  return Boolean(meta?.created_via_wizard === true && meta?.wizard_meta_attested === true);
+}
+
+/** Count how many exception rules point to this policy (policies with exception_for_policy_id === policyId). */
+function countExceptionsForPolicy(policyId, allPolicies) {
+  if (!policyId || !Array.isArray(allPolicies)) return 0;
+  return allPolicies.filter(
+    (p) =>
+      p?.policy_id !== policyId &&
+      p?._wizard_meta &&
+      typeof p._wizard_meta === "object" &&
+      p._wizard_meta.exception_for_policy_id === policyId
+  ).length;
+}
+
+function getExceptionsForPolicy(policyId, allPolicies) {
+  if (!policyId || !Array.isArray(allPolicies)) return [];
+  return allPolicies.filter(
+    (p) =>
+      p?.policy_id !== policyId &&
+      p?._wizard_meta &&
+      typeof p._wizard_meta === "object" &&
+      p._wizard_meta.exception_for_policy_id === policyId
+  );
+}
+
+const POLICY_REGISTRY_TOOLTIP =
+  "Policies define pre-execution governance rules for agent actions, including allow, deny, and require-approval decisions. Each policy specifies an effect, optional conditions, and a scope. Policies are evaluated before execution occurs. Deterministic condition operators include eq, in, prefix, all_under, any_under, and exists. Guardrail: prefix rules are broad; prefer strict in and scoped path operators for security-sensitive exceptions. Click a policy to edit it, enable or disable enforcement, or run a dry-run test against recent traces.";
+
 export function PoliciesView() {
   const [policies, setPolicies] = useState(null);
-  const [selectedPolicy, setSelectedPolicy] = useState(null); // PolicyRecord or null = "new policy"
+  const [drawerStack, setDrawerStack] = useState([]);
+  const selectedPolicy = drawerStack[drawerStack.length - 1] || null;
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
 
-  // Drawer form state
-  const [policyTenant, setPolicyTenant] = useState("");
+  // Drawer state
   const [policyJson, setPolicyJson] = useState("");
   const [dryRunJson, setDryRunJson] = useState("");
   const [dryResult, setDryResult] = useState(null);
-  const [saving, setSaving] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -60,56 +89,72 @@ export function PoliciesView() {
     load();
   }, [tenantId.value, selectedWorkspace.value]);
 
-  const openDrawer = (policy) => {
-    setSelectedPolicy(policy);
+  const openDrawer = (policy, push = false) => {
+    if (!policy) return;
+    setDrawerStack(prev => push && drawerOpen ? [...prev, policy] : [policy]);
     setDrawerOpen(true);
     setDryResult(null);
-    if (policy) {
-      const payload = policyToEditPayload(policy);
-      setPolicyTenant(policy.scope?.tenant_id || policy.tenant_id || tenantId.value || "");
+    const payload = policyToEditPayload(policy);
+    setPolicyJson(JSON.stringify(payload, null, 2));
+    setDryRunJson("");
+  };
+
+  const popDrawer = () => {
+    if (drawerStack.length > 1) {
+      const newStack = drawerStack.slice(0, -1);
+      const prevPolicy = newStack[newStack.length - 1];
+      setDrawerStack(newStack);
+      setDryResult(null);
+      const payload = policyToEditPayload(prevPolicy);
       setPolicyJson(JSON.stringify(payload, null, 2));
       setDryRunJson("");
     } else {
-      setPolicyTenant(tenantId.value || "");
-      setPolicyJson(JSON.stringify(policyToEditPayload(null), null, 2));
-      setDryRunJson("");
+      closeDrawer();
     }
   };
 
   const closeDrawer = () => {
     setDrawerOpen(false);
-    setSelectedPolicy(null);
-    setSaving(false);
+    setDrawerStack([]);
     setToggling(false);
     setDeleting(false);
     setDryResult(null);
   };
 
-  const savePolicy = async () => {
-    setSaving(true);
-    try {
-      const parsed = JSON.parse(policyJson);
-      const tenant = policyTenant || tenantId.value;
-      const scope = { ...(parsed.scope || {}), tenant_id: tenant };
-      await apiPost("/ops/api/policies", { ...parsed, scope, tenant_id: tenant });
-      showToast(selectedPolicy ? "Policy updated" : "Policy created", "success");
-      const data = await api(`/ops/api/policies?${buildParams()}`);
-      const nextPolicies = data.policies || [];
-      setPolicies(nextPolicies);
-      if (selectedPolicy && selectedPolicy.policy_id === parsed.policy_id) {
-        const updated = nextPolicies.find((p) => p.policy_id === parsed.policy_id);
-        if (updated) {
-          setSelectedPolicy(updated);
-          setPolicyJson(JSON.stringify(policyToEditPayload(updated), null, 2));
-        }
-      } else {
-        closeDrawer();
-      }
-    } catch (e) {
-      showToast(`Error: ${e.message}`, "error");
-    } finally {
-      setSaving(false);
-    }
+  const openWizardEditor = (policy) => {
+    if (!policy) return;
+    policyDraftPanel.value = { open: true, mode: "edit", policy, trace: null };
+  };
+
+  const openCreatePolicyWizard = () => {
+    const tenant = tenantId.value || "local";
+    const workspace = selectedWorkspace.value || "local";
+    const trace = {
+      id: `policy-wizard-${Date.now()}`,
+      tenant_id: tenant,
+      workspace_id: workspace,
+      tool_group: "runtime",
+      tool_names: ["exec"],
+      request_snapshot: {
+        request: {
+          tool: "exec",
+          tool_group: "runtime",
+          workspace_id: workspace,
+          context: {
+            exec: { argv0: "exec", cwd: "{{workspace.root}}" },
+            targets: { paths: ["{{workspace.root}}"] },
+          },
+          templateVars: {
+            "workspace.root": "{{workspace.root}}",
+          },
+        },
+      },
+      context: {
+        exec: { argv0: "exec", cwd: "{{workspace.root}}" },
+        targets: { paths: ["{{workspace.root}}"] },
+      },
+    };
+    policyDraftPanel.value = { open: true, mode: "create", trace, policy: null };
   };
 
   const setPolicyEnabled = async (policy, enabled) => {
@@ -164,21 +209,18 @@ export function PoliciesView() {
     }
   };
 
-  const formatJson = () => {
-    try {
-      const parsed = JSON.parse(policyJson);
-      setPolicyJson(JSON.stringify(parsed, null, 2));
-    } catch (e) {
-      showToast("Invalid JSON", "error");
-    }
-  };
-
   const loadDryRunTemplate = () => {
     setDryRunJson(JSON.stringify({
       tenant_id: tenantId.value || "local",
-      user_id: "test-user",
-      tool_name: "delete_file",
-      skill_state: "active"
+      workspace_id: selectedWorkspace.value || "local",
+      tool: "exec",
+      tool_group: "runtime",
+      requested_capabilities: ["exec"],
+      skill_state: "active",
+      context: {
+        exec: { argv0: "ls", argv: ["ls", "-la"], cwd: "/workspace/demo" },
+        targets: { paths: ["/workspace/demo/src/index.ts"] }
+      }
     }, null, 2));
   };
 
@@ -190,53 +232,28 @@ export function PoliciesView() {
     }
   };
 
+  const selectedPolicyExceptions =
+    selectedPolicy && Array.isArray(policies)
+      ? getExceptionsForPolicy(selectedPolicy.policy_id, policies)
+      : [];
+
   return (
     <section>
       <div class="panel">
         <div class="panel-header">
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <h3 data-tooltip="Policies define pre-execution governance rules for agent actions (allow, deny, require-approval).">
-              Policy Registry
-            </h3>
-            <button
-              class="btn-icon"
-              onClick={() => setShowHelp(!showHelp)}
-              title="Toggle help"
-              style={{ color: showHelp ? "var(--text-primary)" : "var(--text-secondary)" }}
-            >
-              <HelpCircleIcon width={20} strokeWidth={3} />
-            </button>
-            <button class="btn-icon" data-tooltip="Reload the policy list" onClick={() => load(true)}>
-              <RefreshIcon />
-            </button>
+            <h3 data-tooltip={POLICY_REGISTRY_TOOLTIP}>Policy Registry</h3>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
             <div class="text-secondary text-xs">{policies ? policies.length : 0} policies</div>
-            <button class="btn-primary" onClick={() => openDrawer(null)} style={{ height: "32px", fontSize: "12px", padding: "0 12px" }}>
+            <button class="btn-secondary btn-sm" data-tooltip="Reload the policy list" onClick={() => load(true)}>
+              <RefreshIcon width={14} /> Refresh
+            </button>
+            <button class="btn-primary" onClick={openCreatePolicyWizard} style={{ height: "32px", fontSize: "12px", padding: "0 12px" }}>
               + New Policy
             </button>
           </div>
         </div>
-
-        {showHelp && (
-          <div
-            style={{
-              padding: "16px",
-              borderBottom: "1px solid var(--border-subtle)",
-              background: "var(--bg-subtle)",
-            }}
-          >
-            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: 0 }}>
-              Policies define pre-execution governance rules for agent actions, including allow, deny, and require-approval decisions.
-            </p>
-            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: "8px 0 0 0" }}>
-              Each policy specifies an effect, optional conditions, and a scope. Policies are evaluated before execution occurs.
-            </p>
-            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: "8px 0 0 0" }}>
-              Click a policy to edit it, enable or disable enforcement, or run a dry-run test against recent traces.
-            </p>
-          </div>
-        )}
 
         <div class="panel-body p-0">
           <div class="list-group">
@@ -274,6 +291,20 @@ export function PoliciesView() {
                       {getPolicyIcon(p.effect?.decision)}
                       <strong style={{ fontSize: "14px", color: "var(--text-primary)" }}>{p.policy_id}</strong>
                       <Badge text={p.enabled ? "Enabled" : "Disabled"} kind={p.enabled ? "success" : "muted"} />
+                      {(() => {
+                        const n = countExceptionsForPolicy(p.policy_id, policies);
+                        if (n === 0) return null;
+                        const label = n === 1 ? "1 exception" : `${n} exceptions`;
+                        return (
+                          <span
+                            class="badge-pill info"
+                            data-tooltip={`This policy has ${label} (allow rules created from approvals that bypass this policy).`}
+                            style={{ fontSize: "10px", fontWeight: "600" }}
+                          >
+                            {label}
+                          </span>
+                        );
+                      })()}
                     </div>
                     <div class="text-secondary text-xs" style={{ marginLeft: "28px" }}>
                       <span style={{ textTransform: "uppercase", fontSize: "10px", fontWeight: "600", opacity: 0.8 }}>{p.effect?.decision ?? "allow"}</span>
@@ -295,83 +326,194 @@ export function PoliciesView() {
       {/* Policy Drawer (edit / new) */}
       <div class={`drawer ${drawerOpen ? "open" : ""}`}>
         <div class="drawer-header">
-          <h3>{selectedPolicy ? "Manage Policy" : "New Policy"}</h3>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            {drawerStack.length > 1 && (
+              <button class="btn-icon" onClick={popDrawer} style={{ marginLeft: "-8px", color: "var(--text-secondary)" }} data-tooltip="Back to previous policy">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="15 18 9 12 15 6" />
+                </svg>
+              </button>
+            )}
+            <h3 style={{ margin: 0 }}>{selectedPolicy ? "Manage Policy" : "New Policy"}</h3>
+          </div>
           <button class="btn-icon" onClick={closeDrawer}>
             <XIcon />
           </button>
         </div>
         <div class="drawer-body">
-          {selectedPolicy && (
-            <div class="detail-block" style={{ marginBottom: "24px" }}>
-              <div class="detail-row">
-                <span class="detail-label">Policy ID</span>
-                <span class="mono">{selectedPolicy.policy_id}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Scope (tenant)</span>
-                <span class="mono">{selectedPolicy.scope?.tenant_id ?? selectedPolicy.tenant_id ?? "—"}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Status</span>
-                <Badge text={selectedPolicy.enabled ? "Enabled" : "Disabled"} kind={selectedPolicy.enabled ? "success" : "muted"} />
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Effect</span>
-                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  {getPolicyIcon(selectedPolicy.effect?.decision)}
-                  <span>{selectedPolicy.effect?.decision ?? "—"}</span>
+          {selectedPolicy ? (
+            <div style={{ marginBottom: "20px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                <div class="text-secondary text-xs">
+                  Tenant: <span class="mono">{selectedPolicy.scope?.tenant_id ?? selectedPolicy.tenant_id ?? "—"}</span>
                 </div>
-              </div>
-              <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: "1px solid var(--border-subtle)" }}>
-                <span class="detail-label" style={{ display: "block", marginBottom: "4px" }}>
-                  Quick actions
-                </span>
-                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button class="btn-primary btn-sm" onClick={() => openWizardEditor(selectedPolicy)}>
+                    {selectedPolicy._wizard_meta?.exception_for_policy_id ? "Edit Exception" : "Edit Policy"}
+                  </button>
                   <button
-                    class={selectedPolicy.enabled ? "btn-secondary" : "btn-primary"}
+                    class="btn-secondary btn-sm"
                     onClick={() => setPolicyEnabled(selectedPolicy, !selectedPolicy.enabled)}
                     disabled={toggling}
-                    style={{ height: "32px" }}
                   >
-                    {toggling ? "…" : selectedPolicy.enabled ? "Disable Policy" : "Enable Policy"}
+                    {toggling ? "…" : selectedPolicy.enabled ? "Disable" : "Enable"}
                   </button>
                 </div>
               </div>
-            </div>
-          )}
 
-          <div class="drawer-section-header">Edit policy</div>
-          <div class="form-group">
-            <label data-tooltip="Tenant this policy applies to">Tenant scope</label>
-            <input placeholder="Tenant ID" value={policyTenant} onInput={(e) => setPolicyTenant(e.target.value)} />
-          </div>
-          <div class="form-group">
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
-              <label data-tooltip="Full policy definition (policy_id, scope, subject, conditions, effect)">Policy JSON</label>
-              <button 
-                onClick={formatJson} 
-                class="text-xs text-secondary hover:text-primary" 
-                style={{ background: "none", border: "none", cursor: "pointer", padding: "0" }}
-              >
-                Format JSON
-              </button>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: "10px", marginBottom: "12px" }}>
+                <div style={{ marginTop: "3px" }}>
+                  {getPolicyIcon(selectedPolicy.effect?.decision)}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div class="mono" style={{ fontSize: "16px", fontWeight: "600", color: "var(--text-primary)", wordBreak: "break-all", lineHeight: "1.4" }}>
+                    {selectedPolicy.policy_id}
+                  </div>
+                </div>
+                <div style={{ flexShrink: 0, marginTop: "2px" }}>
+                  <Badge text={selectedPolicy.enabled ? "Enabled" : "Disabled"} kind={selectedPolicy.enabled ? "success" : "muted"} />
+                </div>
+              </div>
+
+              {selectedPolicy._wizard_meta?.created_via_wizard && (
+                <div class="text-xs text-secondary" style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+                  <Badge text="Wizard" kind="info" />
+                  {selectedPolicy._wizard_meta.actor_user_id && <span>By: {selectedPolicy._wizard_meta.actor_user_id}</span>}
+                  {selectedPolicy._wizard_meta.attested_at && <span>Attested: {new Date(selectedPolicy._wizard_meta.attested_at).toLocaleDateString()}</span>}
+                </div>
+              )}
+
+              {/* EXCEPTION PARENT LINK (If this is an exception) */}
+              {selectedPolicy._wizard_meta?.exception_for_policy_id && (
+                <div style={{ marginTop: "16px" }}>
+                  <div class="text-secondary text-xs" style={{ textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 600, marginBottom: "8px" }}>
+                    Overrides Policy
+                  </div>
+                  <div 
+                    class="mono"
+                    style={{ padding: "8px 12px", borderRadius: "6px", border: "1px dashed var(--accent-primary)", background: "rgba(var(--accent-primary-rgb), 0.05)", color: "var(--accent-primary)", fontSize: "12px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "6px" }}
+                    onClick={() => {
+                      const parentPol = policies?.find(p => p.policy_id === selectedPolicy._wizard_meta.exception_for_policy_id);
+                      if (parentPol) openDrawer(parentPol, true);
+                    }}
+                  >
+                    <LockIcon width={12} />
+                    {selectedPolicy._wizard_meta.exception_for_policy_id}
+                  </div>
+                </div>
+              )}
+
+              {/* RULE DETAILS */}
+              <div style={{ marginTop: "24px", marginBottom: "24px" }}>
+                <div class="text-secondary text-xs" style={{ textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 600, marginBottom: "12px" }}>
+                  Rule Details
+                </div>
+                
+                <div style={{ padding: "16px", background: "var(--bg-subtle)", borderRadius: "8px", border: "1px solid var(--border-subtle)" }}>
+                  <div style={{ display: "grid", gap: "16px" }}>
+                    
+                    {/* Tool */}
+                    <div style={{ display: "flex", gap: "12px" }}>
+                      <div style={{ width: "24px", color: "var(--text-secondary)", display: "flex", justifyContent: "center" }}>
+                        <div style={{ fontWeight: "bold", fontSize: "12px" }}>T</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }}>Tool</div>
+                        <div class="mono text-secondary" style={{ fontSize: "11px", marginTop: "4px" }}>
+                          {selectedPolicy.subject?.name || selectedPolicy.subject?.tool || "Any"}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Command */}
+                    {selectedPolicy.conditions?.["context.exec.argv0"] && (
+                      <div style={{ display: "flex", gap: "12px" }}>
+                        <div style={{ width: "24px", color: "var(--text-secondary)", display: "flex", justifyContent: "center" }}>
+                          <div class="mono" style={{ fontSize: "10px" }}>&gt;_</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }}>Command Match</div>
+                          <div class="mono text-secondary" style={{ fontSize: "11px", marginTop: "4px" }}>
+                            {JSON.stringify(selectedPolicy.conditions["context.exec.argv0"])}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Paths */}
+                    {selectedPolicy.conditions?.["context.targets.paths"] && (
+                      <div style={{ display: "flex", gap: "12px" }}>
+                        <div style={{ width: "24px", color: "var(--text-secondary)", display: "flex", justifyContent: "center" }}>
+                          <div style={{ fontWeight: "bold", fontSize: "12px" }}>P</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }}>Path Scope</div>
+                          <div class="mono text-secondary" style={{ fontSize: "11px", marginTop: "4px", wordBreak: "break-all" }}>
+                            {JSON.stringify(selectedPolicy.conditions["context.targets.paths"])}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* EXCEPTIONS LIST (If Parent) */}
+              {selectedPolicyExceptions.length > 0 && (
+                <div style={{ marginBottom: "24px" }}>
+                  <div class="text-secondary text-xs" style={{ textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 600, marginBottom: "12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>Exceptions ({selectedPolicyExceptions.length})</span>
+                  </div>
+                  
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    {selectedPolicyExceptions.map((ep) => (
+                      <div 
+                        key={ep.policy_id}
+                        class="detail-block"
+                        style={{ padding: "12px 16px", borderRadius: "8px", border: "1px solid var(--border-subtle)", background: "var(--bg-canvas)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between" }}
+                        onClick={() => openDrawer(ep, true)}
+                      >
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+                            <ShieldIcon width={14} style={{ color: "var(--accent-success)" }} />
+                            <span class="mono" style={{ fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>
+                              {ep.policy_id}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: "11px", color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: "8px" }}>
+                            <Badge text={ep.enabled ? "Enabled" : "Disabled"} kind={ep.enabled ? "success" : "muted"} />
+                            <span>•</span>
+                            <span><strong style={{fontWeight:500}}>By:</strong> {ep._wizard_meta?.actor_user_id || "unknown"}</span>
+                          </div>
+                        </div>
+                        <div style={{ color: "var(--text-tertiary)" }}>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="9 18 15 12 9 6" />
+                          </svg>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
-            <textarea
-              class="code-editor"
-              placeholder="{ ... }"
-              value={policyJson}
-              onInput={(e) => setPolicyJson(e.target.value)}
-              style={{ minHeight: "200px" }}
-            />
-          </div>
-          <button
-            class="btn-primary w-full"
-            onClick={savePolicy}
-            disabled={saving}
-            style={{ height: "40px" }}
-          >
-            {saving ? "Saving…" : selectedPolicy ? "Save changes" : "Create policy"}
-          </button>
+          ) : null}
+
+          {selectedPolicy && (
+            <details style={{ marginBottom: "24px" }}>
+              <summary style={{ cursor: "pointer", fontSize: "12px", color: "var(--text-secondary)" }}>
+                Show raw policy JSON (read-only)
+              </summary>
+              <div class="form-group" style={{ marginTop: "10px" }}>
+                <textarea
+                  class="code-editor"
+                  value={policyJson}
+                  readOnly
+                  style={{ minHeight: "220px", opacity: 0.95 }}
+                />
+              </div>
+            </details>
+          )}
 
           <div class="drawer-section-header">Test policy (dry run)</div>
           <div class="form-group">

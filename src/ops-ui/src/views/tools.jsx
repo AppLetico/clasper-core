@@ -1,6 +1,9 @@
 import { useState, useEffect } from "preact/hooks";
-import { HelpCircleIcon, XIcon, ActivityIcon, ShieldIcon } from "../components/icons.jsx";
+import { XIcon, ActivityIcon, ShieldIcon, RefreshIcon } from "../components/icons.jsx";
 import { api } from "../api.js";
+
+const TOOL_REGISTRY_TOOLTIP =
+  "Tools are atomic execution capabilities (functions, APIs, or scripts) that agents must be explicitly authorized to use. Each tool represents a discrete authority boundary. Usage is governed by policy, evaluated per request, and recorded for audit and risk analysis. Unlike Skills, which bundle multiple capabilities, Tools are individual primitives. This registry shows all tools currently known and authorized within this workspace.";
 
 function ToolDrawer({ tool, onClose }) {
   const [history, setHistory] = useState(null);
@@ -110,7 +113,6 @@ function ToolDrawer({ tool, onClose }) {
 }
 
 export function ToolsView() {
-  const [showHelp, setShowHelp] = useState(false);
   const [tools, setTools] = useState(null);
   const [selectedTool, setSelectedTool] = useState(null);
 
@@ -121,6 +123,10 @@ export function ToolsView() {
     } catch {
       setTools([]);
     }
+  };
+
+  const handleRefresh = async () => {
+    await load();
   };
 
   useEffect(() => {
@@ -134,28 +140,15 @@ export function ToolsView() {
       <div class="panel">
         <div class="panel-header">
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <h3 data-tooltip="External tools authorized for agent use">Tool Registry</h3>
-            <button 
-              class="btn-icon" 
-              onClick={() => setShowHelp(!showHelp)} 
-              title="Toggle help"
-              style={{ color: showHelp ? "var(--text-primary)" : "var(--text-secondary)" }}
-            >
-              <HelpCircleIcon width={20} strokeWidth={3} />
+            <h3 data-tooltip={TOOL_REGISTRY_TOOLTIP}>Tool Registry</h3>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+            <div class="text-secondary text-xs">{count} tool{count !== 1 ? "s" : ""}</div>
+            <button class="btn-secondary btn-sm" data-tooltip="Reload the tool list" onClick={handleRefresh}>
+              <RefreshIcon width={14} /> Refresh
             </button>
           </div>
-          <div class="text-secondary text-xs">{count} tool{count !== 1 ? "s" : ""}</div>
         </div>
-
-        {showHelp && (
-          <div style={{ padding: "16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-subtle)" }}>
-            <div class="text-secondary text-sm" style={{ lineHeight: "1.5" }}>
-              <p style={{ margin: "0 0 8px 0" }}>Tools are atomic execution capabilities (functions, APIs, or scripts) that agents must be explicitly authorized to use.</p>
-              <p style={{ margin: "0 0 8px 0" }}>Each tool represents a discrete authority boundary. Usage is governed by policy, evaluated per request, and recorded for audit and risk analysis.</p>
-              <p style={{ margin: 0 }}>Unlike Skills, which bundle multiple capabilities, Tools are individual primitives. This registry shows all tools currently known and authorized within this workspace.</p>
-            </div>
-          </div>
-        )}
 
         <div class="panel-body p-0">
           <div class="list-group">

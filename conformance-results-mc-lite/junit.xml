@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="wombat-control-plane" tests="6" failures="0">
+<testsuite name="clasper-control-plane" tests="6" failures="0">
   <testcase name="capabilities endpoint"></testcase>
   <testcase name="create task with idempotency"></testcase>
   <testcase name="idempotency repeat create"></testcase>

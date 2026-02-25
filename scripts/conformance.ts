@@ -176,7 +176,7 @@ async function run() {
 
   const junit = [
     `<?xml version="1.0" encoding="UTF-8"?>`,
-    `<testsuite name="wombat-control-plane" tests="${results.length}" failures="${failures}">`,
+    `<testsuite name="clasper-control-plane" tests="${results.length}" failures="${failures}">`,
     ...results.map((r) => {
       if (r.status === "passed") {
         return `  <testcase name="${r.name}"></testcase>`;

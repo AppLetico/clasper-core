@@ -8,6 +8,7 @@
  */
 
 import type { OpenClawTool } from './types.js';
+import path from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Intent inference
@@ -88,8 +89,41 @@ export function mapToolContext(
   writes_files?: boolean;
   elevated_privileges?: boolean;
   package_manager?: string;
-  targets?: string[];
+  targets?: string[] | { paths?: string[]; hosts?: string[] };
+  exec?: {
+    argv0?: string;
+    argv?: string[];
+    cwd?: string;
+  };
+  side_effects?: {
+    writes_possible?: boolean;
+    network_possible?: boolean;
+  };
 } {
+  const normalizePath = (input: string): string | null => {
+    try {
+      return path.resolve(input);
+    } catch {
+      return null;
+    }
+  };
+
+  const tokenizeCommand = (command: string): string[] =>
+    command
+      .trim()
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter(Boolean);
+
+  const extractHost = (input: string): string | null => {
+    try {
+      const parsed = new URL(input);
+      return parsed.hostname || null;
+    } catch {
+      return null;
+    }
+  };
+
   const name = tool.name.toLowerCase();
   const argsStr = JSON.stringify(args).toLowerCase();
 
@@ -98,7 +132,16 @@ export function mapToolContext(
     writes_files?: boolean;
     elevated_privileges?: boolean;
     package_manager?: string;
-    targets?: string[];
+    targets?: string[] | { paths?: string[]; hosts?: string[] };
+    exec?: {
+      argv0?: string;
+      argv?: string[];
+      cwd?: string;
+    };
+    side_effects?: {
+      writes_possible?: boolean;
+      network_possible?: boolean;
+    };
   } = {};
 
   // Network signals (canonical + legacy)
@@ -135,15 +178,61 @@ export function mapToolContext(
     context.package_manager = pmMatch[1];
   }
 
+  const networkPossible = context.external_network === true;
+  const writesPossible = context.writes_files === true || name === 'exec' || name === 'shell' || name === 'run_command';
+  context.side_effects = {
+    writes_possible: writesPossible,
+    network_possible: networkPossible,
+  };
+
+  const paths = new Set<string>();
+  const hosts = new Set<string>();
+  if (typeof args.path === 'string') {
+    const normalized = normalizePath(args.path);
+    if (normalized) paths.add(normalized);
+  }
+  if (typeof args.file === 'string') {
+    const normalized = normalizePath(args.file);
+    if (normalized) paths.add(normalized);
+  }
+  if (typeof args.cwd === 'string') {
+    const normalized = normalizePath(args.cwd);
+    if (normalized) paths.add(normalized);
+  }
+  if (typeof args.url === 'string') {
+    const host = extractHost(args.url);
+    if (host) hosts.add(host);
+  }
+
+  // Exec metadata: tokenized command, with argv0 from first token only.
+  if (
+    (name === 'exec' || name === 'shell' || name === 'run_command') &&
+    typeof args.command === 'string'
+  ) {
+    const argv = tokenizeCommand(args.command);
+    context.exec = {
+      argv0: argv[0],
+      argv,
+      cwd: typeof args.cwd === 'string' ? normalizePath(args.cwd) || args.cwd : undefined,
+    };
+  }
+
+  if (paths.size > 0 || hosts.size > 0) {
+    context.targets = {
+      paths: paths.size > 0 ? Array.from(paths) : undefined,
+      hosts: hosts.size > 0 ? Array.from(hosts) : undefined,
+    };
+  }
+
   // Targets (file paths or URLs)
-  const targets: string[] = [];
-  if (typeof args.path === 'string') targets.push(args.path);
-  if (typeof args.file === 'string') targets.push(args.file);
-  if (typeof args.url === 'string') targets.push(args.url);
-  if (typeof args.command === 'string') targets.push(args.command);
-  if (typeof args.cwd === 'string') targets.push(args.cwd);
-  if (targets.length > 0) {
-    context.targets = targets;
+  if (typeof args.command === 'string' && !context.exec) {
+    const commandTokens = tokenizeCommand(args.command);
+    if (commandTokens[0]) {
+      context.exec = {
+        argv0: commandTokens[0],
+        argv: commandTokens,
+      };
+    }
   }
 
   return context;

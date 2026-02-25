@@ -47,11 +47,12 @@ function normalizeCommandClass(params: Record<string, unknown>): string {
 }
 
 export function extractSessionKey(context: Record<string, unknown>): string {
+  // IMPORTANT: do not use per-call IDs (e.g. traceId) here; that breaks
+  // same-request reuse across retries inside one user session.
   const candidates = [
     context.sessionKey,
     context.sessionId,
     context.agentId,
-    context.traceId,
     context.threadId,
   ];
   for (const candidate of candidates) {

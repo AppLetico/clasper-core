@@ -4,6 +4,7 @@ export function Topbar() {
   const route = currentRoute.value;
   const health = healthStatus.value;
   const label = route.charAt(0).toUpperCase() + route.slice(1);
+  const operatorsEnabled = health?.config?.policyOperatorsEnabled === true;
 
   const dotColor = health.ok === null ? "var(--text-tertiary)" : health.ok ? "#10b981" : "#ef4444";
 
@@ -16,6 +17,11 @@ export function Topbar() {
           <h1 class="breadcrumb-current">{label}</h1>
         </div>
         <div class="topbar-actions">
+          {operatorsEnabled && (
+            <div class="badge-pill warn" title="Policy operators are enabled (experimental mode)">
+              Policy operators enabled
+            </div>
+          )}
           <div class="health-badge">
             <span class="health-dot" style={{ background: dotColor }} />
             <span>{health.text}</span>

@@ -29,6 +29,7 @@ type SetupCommandOptions = {
   adapterSecret?: string;
   approvalMode?: "allow" | "block";
   skipOpenclaw?: boolean;
+  upgradeOpenclawPlugin?: boolean;
   link?: boolean;
 };
 
@@ -139,6 +140,7 @@ program
   .option("--adapter-secret <secret>", "Set ADAPTER_JWT_SECRET")
   .option("--approval-mode <mode>", "Set CLASPER_REQUIRE_APPROVAL_IN_CORE: allow|block")
   .option("--skip-openclaw", "Skip OpenClaw integration even when profile=openclaw")
+  .option("--upgrade-openclaw-plugin", "Upgrade/sync the OpenClaw plugin install and config")
   .option("--link", "Run npm link without prompting")
   .action(async (opts: SetupCommandOptions) => {
     await runSetupWizard(packageRoot, copyWorkspaceTemplate, opts);

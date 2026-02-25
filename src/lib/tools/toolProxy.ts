@@ -1,16 +1,16 @@
 /**
  * Tool Proxy System
  *
- * Wombat defines tool schemas for the LLM but proxies execution to the backend.
- * This maintains Wombat's stateless architecture while enabling structured tool calling.
+ * Clasper defines tool schemas for the LLM but proxies execution to the backend.
+ * This maintains Clasper's stateless architecture while enabling structured tool calling.
  *
  * Flow:
  * 1. LLM requests a tool call
- * 2. Wombat validates against skill manifest (fast, local check)
- * 3. Wombat validates tool arguments (path safety, injection prevention)
- * 4. Wombat proxies the call to backend
+ * 2. Clasper validates against skill manifest (fast, local check)
+ * 3. Clasper validates tool arguments (path safety, injection prevention)
+ * 4. Clasper proxies the call to backend
  * 5. Backend validates tenant permissions and executes
- * 6. Wombat receives result and feeds back to LLM
+ * 6. Clasper receives result and feeds back to LLM
  * 
  * Security enhancements inspired by OpenClaw 2026.2.1:
  * - Path traversal prevention (defense in depth)

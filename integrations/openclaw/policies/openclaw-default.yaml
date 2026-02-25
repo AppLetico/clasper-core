@@ -26,6 +26,23 @@
   enabled: true
 
 # --- Side effects: require approval ---
+- policy_id: openclaw-allow-safe-shell-reads
+  subject:
+    type: tool
+  conditions:
+    tool: exec
+    tool_group: runtime
+    context.exec.argv0:
+      in: ["ls", "pwd", "whoami"]
+    context.targets.paths:
+      all_under:
+        - "{{workspace.root}}"
+  effect:
+    decision: allow
+  explanation: "Safe read-only shell commands within workspace."
+  precedence: 30
+  enabled: true
+
 - policy_id: openclaw-require-approval-exec
   subject:
     type: tool

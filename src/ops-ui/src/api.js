@@ -70,9 +70,10 @@ export async function fetchHealth() {
       ok,
       text: ok ? "Systems Operational" : "System Issues Detected",
       components: data.components || {},
+      config: data.config || {},
     };
   } catch {
-    healthStatus.value = { ok: false, text: "Offline", components: {} };
+    healthStatus.value = { ok: false, text: "Offline", components: {}, config: {} };
   }
 }
 

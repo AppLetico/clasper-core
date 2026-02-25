@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { tenantId, selectedWorkspace, routeQuery, formatCost, showToast } from "../state.js";
 import { api, buildParams } from "../api.js";
-import { RefreshIcon, HelpCircleIcon } from "../components/icons.jsx";
+import { RefreshIcon } from "../components/icons.jsx";
 import { copy } from "../copy.js";
+
+const MODEL_USAGE_TOOLTIP =
+  "Model usage shows the cost of model invocations that passed through Clasper governance. Each bar represents governed executions for that day. Click a bar to view the underlying traces, decisions, and policies that authorized the usage.";
 
 function parseRange(q) {
   const params = new URLSearchParams(q || "");
@@ -18,7 +21,6 @@ export function CostView() {
   const [loading, setLoading] = useState(true);
   const [daily, setDaily] = useState([]);
   const [range, setRange] = useState(parseRange(routeQuery.value));
-  const [showHelp, setShowHelp] = useState(false);
 
   // Apply hash query (#cost?range=7d|30d) and then normalize URL to #cost
   useEffect(() => {
@@ -91,15 +93,7 @@ export function CostView() {
       <div class="panel">
         <div class="panel-header">
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <h3 data-tooltip="Model usage shows the cost of model invocations that passed through Clasper governance.">Model Usage</h3>
-            <button 
-              class="btn-icon" 
-              onClick={() => setShowHelp(!showHelp)} 
-              title="Toggle help"
-              style={{ color: showHelp ? "var(--text-primary)" : "var(--text-secondary)" }}
-            >
-              <HelpCircleIcon width={20} strokeWidth={3} />
-            </button>
+            <h3 data-tooltip={MODEL_USAGE_TOOLTIP}>Model Usage</h3>
           </div>
           <div class="toolbar-group">
             <div class="theme-segments" data-tooltip={copy.tooltips.cost.rangeToggle}>
@@ -116,22 +110,11 @@ export function CostView() {
                 30d
               </button>
             </div>
-            <button class="btn-icon" onClick={handleRefresh} title="Refresh" data-tooltip={copy.tooltips.cost.refresh}>
-              <RefreshIcon />
+            <button class="btn-secondary btn-sm" onClick={handleRefresh} title="Refresh" data-tooltip={copy.tooltips.cost.refresh}>
+              <RefreshIcon width={14} /> Refresh
             </button>
           </div>
         </div>
-
-        {showHelp && (
-          <div style={{ padding: "16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-subtle)" }}>
-            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: 0 }}>
-              Model usage shows the cost of model invocations that passed through Clasper governance.
-            </p>
-            <p class="text-secondary text-sm" style={{ lineHeight: "1.5", margin: "8px 0 0 0" }}>
-              Each bar represents governed executions for that day. Click a bar to view the underlying traces, decisions, and policies that authorized the usage.
-            </p>
-          </div>
-        )}
 
         <div class="panel-summary">
           <div class="text-secondary text-xs">{copy.cost.totalLabel(range)}</div>

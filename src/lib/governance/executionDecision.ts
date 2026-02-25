@@ -6,7 +6,15 @@ import { getBudgetManager } from './budgetManager.js';
 import type { BudgetCheckResult } from './budgetManager.js';
 import type { SkillState } from '../skills/skillRegistry.js';
 import { config, getApprovalMode } from '../core/config.js';
-import { logOverrideUsed, logApprovalAutoAllowedInCore, logPolicyFallbackHit } from './auditLog.js';
+import {
+  logOverrideUsed,
+  logApprovalAutoAllowedInCore,
+  logPolicyFallbackHit,
+  logPolicyExceptionHit,
+  logPolicyExceptionMiss,
+  logApprovalGrantCreated,
+  logApprovalGrantConsumed,
+} from './auditLog.js';
 import type { OverrideRequest } from '../ops/overrides.js';
 import type { ExecutionDecision } from '../adapters/executionContract.js';
 import { evaluatePolicies } from '../policy/policyEngine.js';
@@ -46,8 +54,18 @@ export interface ExecutionDecisionRequest {
     writes_files?: boolean;
     elevated_privileges?: boolean;
     package_manager?: string;
-    targets?: string[];
+    targets?: string[] | { paths?: string[]; hosts?: string[] };
+    exec?: {
+      argv0?: string;
+      argv?: string[];
+      cwd?: string;
+    };
+    side_effects?: {
+      writes_possible?: boolean;
+      network_possible?: boolean;
+    };
   };
+  templateVars?: Record<string, string>;
   provenance?: {
     source?: 'marketplace' | 'internal' | 'git' | 'unknown';
     publisher?: string;
@@ -117,8 +135,39 @@ export function evaluateExecutionDecision(
     requested_capabilities: request.requested_capabilities,
     intent: request.intent,
     context: request.context,
+    templateVars: request.templateVars,
     provenance: request.provenance,
   });
+
+  const policyContextSnapshot = {
+    tool: request.tool ?? null,
+    tool_group: request.tool_group ?? null,
+    context: request.context ?? {},
+  };
+
+  for (const traceEntry of policyResult.decision_trace) {
+    const operator = traceEntry.condition_details?.find((d) => d.operator !== 'eq')?.operator;
+    if (traceEntry.result === 'matched' && traceEntry.decision === 'allow' && operator) {
+      logPolicyExceptionHit({
+        tenantId: request.tenant_id,
+        workspaceId: request.workspace_id,
+        executionId,
+        policyId: traceEntry.policy_id,
+        operator,
+        contextSnapshot: policyContextSnapshot,
+      });
+    }
+    if (traceEntry.result === 'skipped' && operator) {
+      logPolicyExceptionMiss({
+        tenantId: request.tenant_id,
+        workspaceId: request.workspace_id,
+        executionId,
+        policyId: traceEntry.policy_id,
+        operator,
+        contextSnapshot: policyContextSnapshot,
+      });
+    }
+  }
 
   const matchedPolicyId =
     policyResult.matched_policies.length === 1 ? policyResult.matched_policies[0] : undefined;
@@ -173,7 +222,21 @@ export function evaluateExecutionDecision(
   }
 
   if (policyResult.decision === 'require_approval' && !request.override) {
+    logApprovalGrantCreated({
+      tenantId: request.tenant_id,
+      workspaceId: request.workspace_id,
+      executionId,
+      policyId: policyResult.matched_policies[0],
+      contextSnapshot: policyContextSnapshot,
+    });
     if (config.requireApprovalInCore === 'allow') {
+      logApprovalGrantConsumed({
+        tenantId: request.tenant_id,
+        workspaceId: request.workspace_id,
+        executionId,
+        policyId: policyResult.matched_policies[0],
+        contextSnapshot: policyContextSnapshot,
+      });
       logApprovalAutoAllowedInCore({
         tenantId: request.tenant_id,
         workspaceId: request.workspace_id,
@@ -204,7 +267,7 @@ export function evaluateExecutionDecision(
       decision: 'require_approval',
       matched_policies: policyResult.matched_policies,
       decision_trace: policyResult.decision_trace,
-      explanation: policyResult.explanation,
+      explanation: `${policyResult.explanation || 'Policy requires approval.'} Approval grant window opened.`,
       granted_scope: buildGrantedScope(request, budgetCheck),
       approval_mode: approvalMode,
       policy_fallback_hit: fallbackHit,
@@ -212,7 +275,21 @@ export function evaluateExecutionDecision(
   }
 
   if (APPROVAL_RISK_LEVELS.includes(riskScore.level) && !request.override) {
+    logApprovalGrantCreated({
+      tenantId: request.tenant_id,
+      workspaceId: request.workspace_id,
+      executionId,
+      policyId: policyResult.matched_policies[0],
+      contextSnapshot: policyContextSnapshot,
+    });
     if (config.requireApprovalInCore === 'allow') {
+      logApprovalGrantConsumed({
+        tenantId: request.tenant_id,
+        workspaceId: request.workspace_id,
+        executionId,
+        policyId: policyResult.matched_policies[0],
+        contextSnapshot: policyContextSnapshot,
+      });
       logApprovalAutoAllowedInCore({
         tenantId: request.tenant_id,
         workspaceId: request.workspace_id,
@@ -243,7 +320,7 @@ export function evaluateExecutionDecision(
       decision: 'require_approval',
       matched_policies: policyResult.matched_policies,
       decision_trace: policyResult.decision_trace,
-      explanation: policyResult.explanation,
+      explanation: `${policyResult.explanation || 'Risk requires approval.'} Approval grant window opened.`,
       granted_scope: buildGrantedScope(request, budgetCheck),
       approval_mode: approvalMode,
       policy_fallback_hit: fallbackHit,

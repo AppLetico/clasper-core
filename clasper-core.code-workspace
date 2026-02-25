@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../clasper-website"
+		},
+		{
+			"path": "../clasper-cloud"
+		},
+		{
+			"path": "../clasper-control-plane-starter"
+		},
+		{
+			"path": "../agent-orchestrator"
+		}
+	]
+}

@@ -11,7 +11,7 @@ import { config } from "../core/config.js";
 import { type TokenUsage, type ConversationMessage } from "./openaiClient.js";
 import { getWorkspaceLoader, type PromptMode } from "../workspace/workspace.js";
 import { getUsageTracker, type CostBreakdown } from "../integrations/costs.js";
-import { llmStream, type WombatStreamEvent } from "./llmProvider.js";
+import { llmStream, type ClasperStreamEvent } from "./llmProvider.js";
 import { nowUTC } from "../security/index.js";
 import type { FastifyReply } from "fastify";
 

@@ -35,7 +35,7 @@ export function AuthModal() {
         </div>
         <div class="modal-body">
           <div class="form-group">
-            <label>Ops API Key</label>
+            <label data-tooltip="Authenticates your session with the Clasper Core Ops API. Use the key from your control plane or environment (e.g. CLASPER_OPS_API_KEY).">Ops API Key</label>
             <input ref={inputRef} type="password" placeholder="Paste Ops API key..." value={val} onInput={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save()} />
           </div>
           <div class="flex gap-2 justify-end">

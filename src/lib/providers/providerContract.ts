@@ -2,7 +2,7 @@
  * Provider Contract
  *
  * Defines a normalized interface for LLM providers.
- * Providers adapt to Wombat - not the other way around.
+ * Providers adapt to Clasper - not the other way around.
  *
  * Features:
  * - Unified response format across all providers
@@ -282,7 +282,7 @@ export interface ProviderCapabilities {
 
 /**
  * Provider adapter interface
- * Each provider must implement this to work with Wombat
+ * Each provider must implement this to work with Clasper
  */
 export interface ProviderAdapter {
   // Identity

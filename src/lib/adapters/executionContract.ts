@@ -18,6 +18,7 @@ export interface ExecutionRequest {
   /** How the intent was derived (e.g. "heuristic"). Assistive signal only. */
   intent_source?: string;
   context?: ExecutionContext;
+  templateVars?: Record<string, string>;
   provenance?: ExecutionProvenance;
 }
 
@@ -44,9 +45,31 @@ export const ExecutionRequestSchema = z.object({
       writes_files: z.boolean().optional(),
       elevated_privileges: z.boolean().optional(),
       package_manager: z.string().optional(),
-      targets: z.array(z.string()).optional(),
+      targets: z
+        .union([
+          z.array(z.string()),
+          z.object({
+            paths: z.array(z.string()).optional(),
+            hosts: z.array(z.string()).optional(),
+          }),
+        ])
+        .optional(),
+      exec: z
+        .object({
+          argv0: z.string().optional(),
+          argv: z.array(z.string()).optional(),
+          cwd: z.string().optional(),
+        })
+        .optional(),
+      side_effects: z
+        .object({
+          writes_possible: z.boolean().optional(),
+          network_possible: z.boolean().optional(),
+        })
+        .optional(),
     })
     .optional(),
+  templateVars: z.record(z.string()).optional(),
   provenance: z
     .object({
       source: z.enum(['marketplace', 'internal', 'git', 'unknown']).optional(),
@@ -61,7 +84,16 @@ export interface ExecutionContext {
   writes_files?: boolean;
   elevated_privileges?: boolean;
   package_manager?: string;
-  targets?: string[];
+  targets?: string[] | { paths?: string[]; hosts?: string[] };
+  exec?: {
+    argv0?: string;
+    argv?: string[];
+    cwd?: string;
+  };
+  side_effects?: {
+    writes_possible?: boolean;
+    network_possible?: boolean;
+  };
 }
 
 export interface ExecutionProvenance {
@@ -102,6 +134,13 @@ export interface ExecutionDecision {
     result: 'matched' | 'skipped';
     decision?: 'allow' | 'deny' | 'require_approval';
     explanation?: string;
+    condition_details?: {
+      field: string;
+      operator: string;
+      expected: unknown;
+      actual: unknown;
+      result: boolean;
+    }[];
   }[];
   explanation?: string;
   /**
@@ -138,6 +177,17 @@ export const ExecutionDecisionSchema = z.object({
         result: z.enum(['matched', 'skipped']),
         decision: z.enum(['allow', 'deny', 'require_approval']).optional(),
         explanation: z.string().optional(),
+        condition_details: z
+          .array(
+            z.object({
+              field: z.string(),
+              operator: z.string(),
+              expected: z.unknown(),
+              actual: z.unknown(),
+              result: z.boolean(),
+            })
+          )
+          .optional(),
       })
     )
     .optional(),

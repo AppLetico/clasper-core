@@ -2,13 +2,15 @@ import { useEffect, useState } from "preact/hooks";
 import { selectedWorkspace, showToast } from "../state.js";
 import { api, apiPost } from "../api.js";
 import { Badge } from "../components/badge.jsx";
-import { XIcon, HelpCircleIcon } from "../components/icons.jsx";
+import { XIcon, RefreshIcon } from "../components/icons.jsx";
 import { SKILL_STATE_KIND, SKILL_STATE_LABEL, titleCase } from "../labelColors.js";
+
+const SKILL_REGISTRY_TOOLTIP =
+  "Skills are reusable, governed bundles of execution capabilities registered in this workspace. Each skill groups one or more tools under a single authority boundary. Skills move through a lifecycle to control where and how they may be used. Draft and experimental skills are under development, active skills are available for use, approved skills are intended for production workflows, and deprecated skills are blocked from new invocations. Clicking a skill allows you to manage its lifecycle and review the capabilities it authorizes.";
 
 export function SkillsView() {
   const [skills, setSkills] = useState(null);
   const [selectedSkill, setSelectedSkill] = useState(null); // The skill being edited in drawer
-  const [showHelp, setShowHelp] = useState(false);
   
   // Form state for the drawer
   const [targetState, setTargetState] = useState("active");
@@ -21,6 +23,11 @@ export function SkillsView() {
       const data = await api(`/ops/api/skills/registry?${params}`);
       setSkills(data.skills || []);
     } catch { setSkills([]); }
+  };
+
+  const handleRefresh = async () => {
+    await load();
+    showToast("Skills refreshed", "success");
   };
 
   useEffect(() => { load(); }, [selectedWorkspace.value]);
@@ -60,28 +67,15 @@ export function SkillsView() {
       <div class="panel">
         <div class="panel-header">
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <h3 data-tooltip="All registered skills and their current lifecycle state">Skill Registry</h3>
-            <button 
-              class="btn-icon" 
-              onClick={() => setShowHelp(!showHelp)} 
-              title="Toggle help"
-              style={{ color: showHelp ? "var(--text-primary)" : "var(--text-secondary)" }}
-            >
-              <HelpCircleIcon width={20} strokeWidth={3} />
+            <h3 data-tooltip={SKILL_REGISTRY_TOOLTIP}>Skill Registry</h3>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+            <div class="text-secondary text-xs">{skills ? skills.length : 0} skills</div>
+            <button class="btn-secondary btn-sm" data-tooltip="Reload the skill list" onClick={handleRefresh}>
+              <RefreshIcon width={14} /> Refresh
             </button>
           </div>
-          <div class="text-secondary text-xs">{skills ? skills.length : 0} skills</div>
         </div>
-        
-        {showHelp && (
-          <div style={{ padding: "16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-subtle)" }}>
-            <div class="text-secondary text-sm" style={{ lineHeight: "1.5" }}>
-              <p style={{ margin: "0 0 8px 0" }}>Skills are reusable, governed bundles of execution capabilities registered in this workspace. Each skill groups one or more tools under a single authority boundary.</p>
-              <p style={{ margin: "0 0 8px 0" }}>Skills move through a lifecycle to control where and how they may be used. Draft and experimental skills are under development, active skills are available for use, approved skills are intended for production workflows, and deprecated skills are blocked from new invocations.</p>
-              <p style={{ margin: 0 }}>Clicking a skill allows you to manage its lifecycle and review the capabilities it authorizes.</p>
-            </div>
-          </div>
-        )}
 
         <div class="panel-body p-0">
           <div class="list-group">

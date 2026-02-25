@@ -94,6 +94,9 @@ export const config = {
   deepLinkDocTemplate: process.env.DEEP_LINK_DOC_TEMPLATE || "",
   deepLinkMsgTemplate: process.env.DEEP_LINK_MSG_TEMPLATE || "",
 
+  // Enable policy condition operators (in, prefix, all_under, etc).
+  policyOperatorsEnabled: process.env.CLASPER_POLICY_OPERATORS === "true",
+
   // Approval behavior in Core (OSS).
   //
   // OSS can enforce approvals locally (self-attested) via the Ops Console. For rapid iteration, it's also

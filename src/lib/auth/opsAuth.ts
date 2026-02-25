@@ -14,6 +14,31 @@ export interface OpsContext {
 
 export type Permission = string;
 
+const LOCAL_ROLE_PERMISSIONS: Record<OpsRole, Permission[]> = {
+  viewer: [
+    "audit:view",
+    "policy:view",
+  ],
+  operator: [
+    "audit:view",
+    "policy:view",
+    "policy:manage",
+    "decision:resolve",
+  ],
+  release_manager: [
+    "audit:view",
+    "policy:view",
+    "policy:manage",
+    "decision:resolve",
+  ],
+  admin: [
+    "audit:view",
+    "policy:view",
+    "policy:manage",
+    "decision:resolve",
+  ],
+};
+
 export class OpsAuthError extends Error {
   code: "missing_token" | "invalid_token" | "config_error";
 
@@ -75,9 +100,9 @@ export function requireRole(_context: OpsContext, _minimumRole: OpsRole): void {
 }
 
 export function requirePermission(_context: OpsContext, _permission: Permission): void {
-  // Single-tenant local ops: no permission registry.
+  // Single-tenant local ops: permission checks are currently non-blocking.
 }
 
-export function getContextPermissions(_context: OpsContext): Permission[] {
-  return [];
+export function getContextPermissions(context: OpsContext): Permission[] {
+  return [...new Set(LOCAL_ROLE_PERMISSIONS[context.role] || [])];
 }

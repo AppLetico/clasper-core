@@ -113,7 +113,9 @@ return (
             <h3>Recent High Risk Traces</h3>
             <a href="#traces?risk_level=high" class="text-secondary" style={{ fontSize: "12px", textDecoration: "none" }}>View all</a>
           </div>
-          <button class="btn-icon" title="Refresh" onClick={handleRefresh}><RefreshIcon /></button>
+          <button class="btn-secondary btn-sm" title="Refresh" onClick={handleRefresh}>
+            <RefreshIcon width={14} /> Refresh
+          </button>
         </div>
         <div class="panel-list">
           {!highRisk.length && <div class="empty-state">No high risk traces found.</div>}

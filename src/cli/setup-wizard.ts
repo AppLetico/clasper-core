@@ -14,6 +14,7 @@ export type SetupWizardOptions = {
   adapterSecret?: string;
   approvalMode?: "allow" | "block";
   skipOpenclaw?: boolean;
+  upgradeOpenclawPlugin?: boolean;
   link?: boolean;
 };
 
@@ -213,6 +214,51 @@ function pickProviderKey(provider: string): string | undefined {
   return PROVIDER_KEY_MAP[provider];
 }
 
+async function syncOpenClawPlugin(
+  packageRoot: string,
+  port: string,
+  adapterSecret: string,
+): Promise<void> {
+  if (!commandExists("openclaw")) {
+    throw new Error(
+      "OpenClaw was not found in PATH. Install OpenClaw first, then rerun this command.",
+    );
+  }
+
+  const pluginPath = join(packageRoot, "integrations", "openclaw");
+  const removedPluginCopies = purgeStaleOpenClawPluginCopies();
+  if (removedPluginCopies.length > 0) {
+    console.log(`Removed stale OpenClaw plugin copies: ${removedPluginCopies.join(", ")}`);
+  }
+
+  const { path: preflightConfigPath, changed } = clearOpenClawPluginEntries();
+  if (changed) {
+    console.log(`Cleaned existing OpenClaw plugin entries: ${preflightConfigPath}`);
+  }
+
+  console.log("Installing OpenClaw plugin...");
+  const pluginCode = await runCommand(
+    "openclaw",
+    ["plugins", "install", pluginPath],
+    packageRoot,
+  );
+  if (pluginCode !== 0) {
+    throw new Error("Failed to install OpenClaw plugin.");
+  }
+
+  const { path: openclawConfigPath } = ensureOpenClawConfig(
+    `http://localhost:${port}`,
+    adapterSecret,
+  );
+  console.log(`Updated OpenClaw config: ${openclawConfigPath}`);
+
+  console.log("Seeding OpenClaw policies...");
+  const seedCode = await runCommand("npm", ["run", "seed:openclaw-policies"], packageRoot);
+  if (seedCode !== 0) {
+    console.log("Policy seeding did not complete. Start Clasper Core (`clasper-core dev`) and re-run `clasper-core seed openclaw`.");
+  }
+}
+
 function selectProfileFromInput(answer: string): SetupProfile | null {
   const normalized = answer.trim().toLowerCase();
   if (normalized === "1" || normalized === "core" || normalized === "clasper-core") {
@@ -308,14 +354,21 @@ export async function runSetupWizard(
       options.adapterSecret ?? envValues.ADAPTER_JWT_SECRET ?? randomBytes(16).toString("hex");
     const defaultApproval = options.approvalMode ?? (envValues.CLASPER_REQUIRE_APPROVAL_IN_CORE === "allow" ? "allow" : "block");
     const defaultProvider = envValues.LLM_PROVIDER || "openai";
+    const upgradeOpenClawPluginOnly = options.upgradeOpenclawPlugin === true;
+
+    if (upgradeOpenClawPluginOnly && !options.nonInteractive) {
+      console.log("Upgrade mode: syncing OpenClaw plugin + config + policies.");
+      console.log("Tip: use --non-interactive to run this as a one-liner in the future.");
+      console.log("");
+    }
 
     const port =
-      options.nonInteractive === true
+      options.nonInteractive === true || upgradeOpenClawPluginOnly
         ? defaultPort
         : await askInput(rl, `CLASPER_PORT [${defaultPort}]: `, defaultPort);
 
     const adapterSecret =
-      options.nonInteractive === true
+      options.nonInteractive === true || upgradeOpenClawPluginOnly
         ? defaultSecret
         : await askInput(
             rl,
@@ -324,7 +377,7 @@ export async function runSetupWizard(
           );
 
     const approvalMode =
-      options.nonInteractive === true
+      options.nonInteractive === true || upgradeOpenClawPluginOnly
         ? defaultApproval
         : await askInput(
             rl,
@@ -333,7 +386,7 @@ export async function runSetupWizard(
           );
 
     const provider =
-      options.nonInteractive === true
+      options.nonInteractive === true || upgradeOpenClawPluginOnly
         ? defaultProvider
         : await askInput(rl, `LLM_PROVIDER [${defaultProvider}] (blank to keep): `, defaultProvider);
 
@@ -347,20 +400,22 @@ export async function runSetupWizard(
       );
     }
 
-    envText = setEnvValue(envText, "CLASPER_PORT", port);
-    envText = setEnvValue(envText, "ADAPTER_JWT_SECRET", adapterSecret);
-    envText = setEnvValue(
-      envText,
-      "CLASPER_REQUIRE_APPROVAL_IN_CORE",
-      approvalMode === "allow" ? "allow" : "block",
-    );
-    envText = setEnvValue(envText, "LLM_PROVIDER", provider);
-    envText = setEnvValue(envText, "AGENT_DAEMON_URL", `http://localhost:${port}`);
-    if (providerKey && providerApiKey) {
-      envText = setEnvValue(envText, providerKey, providerApiKey);
+    if (!upgradeOpenClawPluginOnly) {
+      envText = setEnvValue(envText, "CLASPER_PORT", port);
+      envText = setEnvValue(envText, "ADAPTER_JWT_SECRET", adapterSecret);
+      envText = setEnvValue(
+        envText,
+        "CLASPER_REQUIRE_APPROVAL_IN_CORE",
+        approvalMode === "allow" ? "allow" : "block",
+      );
+      envText = setEnvValue(envText, "LLM_PROVIDER", provider);
+      envText = setEnvValue(envText, "AGENT_DAEMON_URL", `http://localhost:${port}`);
+      if (providerKey && providerApiKey) {
+        envText = setEnvValue(envText, providerKey, providerApiKey);
+      }
+      writeFileSync(envPath, envText, "utf8");
+      console.log("Updated .env");
     }
-    writeFileSync(envPath, envText, "utf8");
-    console.log("Updated .env");
 
     if (needsBuild(packageRoot)) {
       console.log("Building project...");
@@ -372,52 +427,29 @@ export async function runSetupWizard(
       console.log("Build artifacts are up to date.");
     }
 
-    const workspacePath = join(packageRoot, "workspace");
-    if (!existsSync(workspacePath)) {
-      copyWorkspaceTemplate(workspacePath, false);
-      console.log(`Initialized workspace at ${workspacePath}`);
+    if (!upgradeOpenClawPluginOnly) {
+      const workspacePath = join(packageRoot, "workspace");
+      if (!existsSync(workspacePath)) {
+        copyWorkspaceTemplate(workspacePath, false);
+        console.log(`Initialized workspace at ${workspacePath}`);
+      }
     }
 
-    const shouldRunOpenClaw = profile === "openclaw" && options.skipOpenclaw !== true;
+    const shouldRunOpenClaw = (profile === "openclaw" && options.skipOpenclaw !== true) || upgradeOpenClawPluginOnly;
     if (shouldRunOpenClaw) {
-      if (!commandExists("openclaw")) {
-        console.log("");
-        console.log("OpenClaw was not found in PATH.");
-        console.log("Install OpenClaw, then run `clasper-core setup --profile openclaw` again.");
-      } else {
-        const pluginPath = join(packageRoot, "integrations", "openclaw");
-        // Old plugin copies may crash OpenClaw CLI before install starts.
-        const removedPluginCopies = purgeStaleOpenClawPluginCopies();
-        if (removedPluginCopies.length > 0) {
-          console.log(`Removed stale OpenClaw plugin copies: ${removedPluginCopies.join(", ")}`);
-        }
-        // Clear stale entries so strict OpenClaw validation doesn't fail before install.
-        const { path: preflightConfigPath, changed } = clearOpenClawPluginEntries();
-        if (changed) {
-          console.log(`Cleaned existing OpenClaw plugin entries: ${preflightConfigPath}`);
-        }
-
-        console.log("Installing OpenClaw plugin...");
-        const pluginCode = await runCommand(
-          "openclaw",
-          ["plugins", "install", pluginPath],
-          packageRoot,
-        );
-        if (pluginCode !== 0) {
-          throw new Error("Failed to install OpenClaw plugin.");
-        }
-        const { path: openclawConfigPath } = ensureOpenClawConfig(
-          `http://localhost:${port}`,
-          adapterSecret,
-        );
-        console.log(`Updated OpenClaw config: ${openclawConfigPath}`);
-
-        console.log("Seeding OpenClaw policies...");
-        const seedCode = await runCommand("npm", ["run", "seed:openclaw-policies"], packageRoot);
-        if (seedCode !== 0) {
-          console.log("Policy seeding did not complete. Start Clasper Core (`clasper-core dev`) and re-run `clasper-core seed openclaw`.");
-        }
+      if (!adapterSecret) {
+        throw new Error("ADAPTER_JWT_SECRET is required to configure the OpenClaw plugin.");
       }
+      await syncOpenClawPlugin(packageRoot, port, adapterSecret);
+    }
+
+    if (upgradeOpenClawPluginOnly) {
+      console.log("");
+      console.log("OpenClaw plugin upgrade complete.");
+      console.log("Next steps:");
+      console.log("  1) Run: openclaw gateway restart");
+      console.log("  2) Verify startup logs include: Approval settings: wait=..., poll=..., reuse_window=...");
+      return;
     }
 
     let shouldLink = options.link === true;

@@ -426,41 +426,92 @@ button, input, select, textarea { font-family: inherit; font-size: 13px; }
   transition: transform 0.2s, box-shadow 0.2s;
 }
 
-/* Tooltips (JS Based) */
-[data-tooltip] { cursor: help; }
-
-.tooltip-popup {
-  position: fixed;
-  padding: 6px 10px;
-  background: #0f172a;
-  color: #f8fafc;
-  font-size: 11px;
-  border-radius: 6px;
-  white-space: nowrap;
-  pointer-events: none;
-  border: 1px solid #334155;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
-  z-index: 9999;
-  font-weight: 500;
-  opacity: 0;
-  transform: translateY(4px);
-  transition: opacity 0.15s, transform 0.15s;
+/* Tooltips (Tippy.js) */
+[data-tooltip] {
+  cursor: help;
 }
 
-.tooltip-popup.visible {
-  opacity: 1;
-  transform: translateY(0);
+/* Tippy.js base (required for positioning and arrow) */
+[data-tippy-root] {
+  max-width: calc(100vw - 10px);
 }
-
-.tooltip-popup::after {
-  content: '';
+.tippy-box {
+  position: relative;
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: normal;
+  outline: 0;
+  transition-property: transform, visibility, opacity;
+}
+.tippy-box[data-placement^="top"] > .tippy-arrow {
+  bottom: 0;
+}
+.tippy-box[data-placement^="top"] > .tippy-arrow::before {
+  bottom: -7px;
+  left: 0;
+  border-width: 8px 8px 0;
+  border-top-color: initial;
+  transform-origin: center top;
+}
+.tippy-box[data-placement^="bottom"] > .tippy-arrow {
+  top: 0;
+}
+.tippy-box[data-placement^="bottom"] > .tippy-arrow::before {
+  top: -7px;
+  left: 0;
+  border-width: 0 8px 8px;
+  border-bottom-color: initial;
+  transform-origin: center bottom;
+}
+.tippy-box[data-placement^="left"] > .tippy-arrow {
+  right: 0;
+}
+.tippy-box[data-placement^="left"] > .tippy-arrow::before {
+  border-width: 8px 0 8px 8px;
+  border-left-color: initial;
+  right: -7px;
+  transform-origin: center left;
+}
+.tippy-box[data-placement^="right"] > .tippy-arrow {
+  left: 0;
+}
+.tippy-box[data-placement^="right"] > .tippy-arrow::before {
+  left: -7px;
+  border-width: 8px 8px 8px 0;
+  border-right-color: initial;
+  transform-origin: center right;
+}
+.tippy-arrow {
+  width: 16px;
+  height: 16px;
+}
+.tippy-arrow::before {
+  content: "";
   position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border-width: 5px;
+  border-color: transparent;
   border-style: solid;
-  border-color: #334155 transparent transparent transparent;
+}
+
+/* Clasper theme */
+.tippy-box[data-theme~="clasper"] {
+  background: var(--bg-panel, #0f172a);
+  color: var(--text-primary, #f8fafc);
+  font-size: 12px;
+  border-radius: 8px;
+  padding: 0;
+  border: 1px solid var(--border-subtle, #334155);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  max-width: 320px;
+  text-align: left;
+}
+
+.tippy-box[data-theme~="clasper"] > .tippy-arrow {
+  color: var(--bg-panel, #0f172a);
+}
+
+.tippy-box[data-theme~="clasper"] .tippy-content {
+  padding: 10px 12px;
 }
 
 .stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--border-panel); }
@@ -996,9 +1047,10 @@ textarea.code-editor { font-family: 'JetBrains Mono', monospace; font-size: 12px
 .btn-ghost { background: transparent; color: var(--text-secondary); }
 .btn-ghost:hover { color: var(--text-primary); background: rgba(255,255,255,0.05); }
 
-.btn-icon { padding: 6px; width: 32px; height: 32px; color: var(--text-secondary); background: transparent; }
+.btn-icon { padding: 4px; width: 32px; height: 32px; color: var(--text-secondary); background: transparent; display: inline-flex; align-items: center; justify-content: center; }
 .btn-icon:hover { color: var(--text-primary); background: rgba(255,255,255,0.05); }
-.btn-icon svg { width: 16px; height: 16px; }
+/* 24px = 1:1 with 24 viewBox for crisp rendering; avoid fractional scaling */
+.btn-icon svg { width: 24px; height: 24px; flex-shrink: 0; }
 
 .w-full { width: 100%; }
 

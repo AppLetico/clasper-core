@@ -1,5 +1,5 @@
 /**
- * Wombat Ops Library
+ * Clasper Ops Library
  *
  * Organized into logical modules:
  * - core: Database, config

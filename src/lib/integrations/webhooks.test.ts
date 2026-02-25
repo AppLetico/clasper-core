@@ -138,7 +138,7 @@ describe("webhooks", () => {
         expect.any(String),
         expect.objectContaining({
           headers: expect.objectContaining({
-            "X-Wombat-Signature": expect.any(String)
+            "X-Clasper-Signature": expect.any(String)
           })
         })
       );

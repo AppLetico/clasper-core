@@ -122,7 +122,7 @@ export function SettingsView() {
             <div class="panel-header">
               <div class="flex items-center gap-2">
                 <GearIcon width={16} class="text-secondary" />
-                <h3>Console Preferences</h3>
+                <h3 data-tooltip="Appearance, refresh rate, table size, and notification behavior for the Ops Console.">Console Preferences</h3>
               </div>
             </div>
             <div class="panel-body">
@@ -177,7 +177,7 @@ export function SettingsView() {
              <div class="panel-header">
               <div class="flex items-center gap-2">
                 <LockIcon width={16} class="text-secondary" />
-                <h3>Data & Privacy</h3>
+                <h3 data-tooltip="Reset defaults or clear locally stored data. Only affects this browser; your token is preserved.">Data & Privacy</h3>
               </div>
             </div>
             <div class="panel-body">
@@ -199,7 +199,7 @@ export function SettingsView() {
             <div class="panel-header">
               <div class="flex items-center gap-2">
                 <ShieldIcon width={16} class="text-secondary" />
-                <h3>Governance Defaults</h3>
+                <h3 data-tooltip="Default environment, cost and risk alert thresholds, and how long trace history is shown.">Governance Defaults</h3>
               </div>
             </div>
             <div class="panel-body">
@@ -239,7 +239,7 @@ export function SettingsView() {
             <div class="panel-header">
               <div class="flex items-center gap-2">
                 <ShieldIcon width={16} class="text-secondary" />
-                <h3>API Conformance</h3>
+                <h3 data-tooltip="Verify this control plane implements the Mission Control API. Run conformance per workspace using the agent token.">API Conformance</h3>
               </div>
             </div>
             <div class="panel-body">
@@ -285,7 +285,7 @@ export function SettingsView() {
             <div class="panel-header">
               <div class="flex items-center gap-2">
                 <ActivityIcon width={16} class="text-secondary" />
-                <h3>Network & API</h3>
+                <h3 data-tooltip="Request timeouts, SSE reconnect delay, and optional desktop or sound alerts for critical events.">Network & API</h3>
               </div>
             </div>
             <div class="panel-body">
@@ -353,7 +353,7 @@ function SystemInfo({ serverInfo }) {
       <div class="panel-header">
         <div class="flex items-center gap-2">
           <BoltIcon width={16} class="text-secondary" />
-          <h3>System Info</h3>
+          <h3 data-tooltip="Console and server version, connection status, and environment.">System Info</h3>
         </div>
       </div>
       <div class="panel-body">

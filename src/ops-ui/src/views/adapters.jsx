@@ -1,13 +1,15 @@
 import { useEffect, useState } from "preact/hooks";
 import { tenantId, selectedWorkspace, showToast } from "../state.js";
 import { api, buildParams } from "../api.js";
-import { XIcon, HelpCircleIcon } from "../components/icons.jsx";
+import { XIcon, RefreshIcon } from "../components/icons.jsx";
 import { RISK_KIND, RISK_LABEL, titleCase } from "../labelColors.js";
+
+const REGISTERED_ADAPTERS_TOOLTIP =
+  "Adapters are external runtimes that execute actions and report telemetry (traces, decisions, cost) to this control plane. Adapters register automatically when they connect. The list below shows all adapters currently known to Clasper Core. Telemetry recorded by Clasper Core is self-attested. Trusted adapter identities, signing keys, and externally verifiable proof are provided by Clasper Cloud.";
 
 export function AdaptersView() {
   const [adapters, setAdapters] = useState(null);
   const [selectedAdapter, setSelectedAdapter] = useState(null);
-  const [showHelp, setShowHelp] = useState(false);
 
   const load = async () => {
     try {
@@ -35,31 +37,15 @@ export function AdaptersView() {
       <div class="panel">
         <div class="panel-header">
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <h3 data-tooltip="External adapters registered with this control plane">Registered Adapters</h3>
-            <button 
-              class="btn-icon" 
-              onClick={() => setShowHelp(!showHelp)} 
-              title="Toggle help"
-              style={{ color: showHelp ? "var(--text-primary)" : "var(--text-secondary)" }}
-            >
-              <HelpCircleIcon width={20} strokeWidth={3} />
+            <h3 data-tooltip={REGISTERED_ADAPTERS_TOOLTIP}>Registered Adapters</h3>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+            <span class="text-secondary text-xs">{adapters ? adapters.length : 0} adapters</span>
+            <button class="btn-secondary btn-sm" data-tooltip="Reload the adapter list" onClick={handleRefresh}>
+              <RefreshIcon width={14} /> Refresh
             </button>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-            <span class="text-secondary text-xs">{adapters ? adapters.length : 0} adapters</span>
-            <button class="btn-secondary btn-sm" data-tooltip="Reload the adapter list" onClick={handleRefresh}>Refresh</button>
-          </div>
         </div>
-
-        {showHelp && (
-          <div style={{ padding: "16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-subtle)" }}>
-            <div class="text-secondary text-sm" style={{ lineHeight: "1.5" }}>
-              <p style={{ margin: "0 0 8px 0" }}>Adapters are external runtimes that execute actions and report telemetry (traces, decisions, cost) to this control plane.</p>
-              <p style={{ margin: "0 0 8px 0" }}>Adapters register automatically when they connect. The list below shows all adapters currently known to Clasper Core.</p>
-              <p style={{ margin: 0 }}>Telemetry recorded by Clasper Core is self-attested. Trusted adapter identities, signing keys, and externally verifiable proof are provided by Clasper Cloud.</p>
-            </div>
-          </div>
-        )}
 
         <div class="panel-body p-0">
           <div class="list-group">
@@ -138,6 +124,30 @@ export function AdaptersView() {
                 <div class="detail-row">
                   <span class="detail-label">Last updated</span>
                   <span>{selectedAdapter.updated_at || "—"}</span>
+                </div>
+              </div>
+
+              <div class="drawer-section-header" style={{ marginTop: "4px", marginBottom: "6px" }}>Plugin runtime</div>
+              <div class="detail-block" style={{ padding: "10px 16px", marginBottom: 0 }}>
+                <div class="detail-row">
+                  <span class="detail-label">Integration</span>
+                  <span class="mono">
+                    {selectedAdapter.adapter_id?.startsWith("openclaw") ? "clasper-openclaw" : "adapter-managed"}
+                  </span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Reported version</span>
+                  <span class="mono">v{selectedAdapter.version}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Runtime</span>
+                  <span>{selectedAdapter.display_name || "External adapter runtime"}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Source</span>
+                  <span class="text-secondary text-xs">
+                    Self-reported by adapter registration
+                  </span>
                 </div>
               </div>
 

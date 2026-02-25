@@ -38,7 +38,7 @@ If you want the deeper boundary (and the “trust model” details), see [`docs/
 
 ## What You Get in Clasper Core
 
-- **Policy engine** — deterministic evaluation, `allow / deny / require_approval / pending`
+- **Policy engine** — deterministic evaluation with bounded operators (`eq`, `in`, `prefix`, `all_under`, `any_under`, `exists`), `allow / deny / require_approval / pending`
 - **Capability request model** — explicit scope + decision traces
 - **Adapter contract** — external execution adapters can request decisions and ingest telemetry
 - **Local observability** — trace capture, replay, diff, annotations

@@ -103,6 +103,41 @@ export function listPendingDecisions(params: {
   return rows.map(rowToRecord);
 }
 
+export function listDecisions(params: {
+  tenantId: string;
+  workspaceId?: string;
+  status: DecisionStatus;
+  limit?: number;
+  offset?: number;
+}): DecisionRecord[] {
+  const db = getDatabase();
+  const limit = params.limit ?? 100;
+  const offset = params.offset ?? 0;
+
+  const conditions = ['tenant_id = ?', 'status = ?'];
+  const values: unknown[] = [params.tenantId, params.status];
+  if (params.workspaceId) {
+    conditions.push('workspace_id = ?');
+    values.push(params.workspaceId);
+  }
+
+  const whereClause = conditions.join(' AND ');
+  const orderField = params.status === 'pending' ? 'created_at' : 'updated_at';
+  const orderDirection = params.status === 'pending' ? 'ASC' : 'DESC';
+  const rows = db
+    .prepare(
+      `
+      SELECT * FROM decisions
+      WHERE ${whereClause}
+      ORDER BY ${orderField} ${orderDirection}
+      LIMIT ? OFFSET ?
+    `
+    )
+    .all(...values, limit, offset) as DecisionRow[];
+
+  return rows.map(rowToRecord);
+}
+
 /**
  * Get the most recent decision for a specific execution (used for adapter retry/resume).
  */

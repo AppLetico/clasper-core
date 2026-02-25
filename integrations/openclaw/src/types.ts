@@ -95,8 +95,18 @@ export interface ExecutionRequest {
     writes_files?: boolean;
     elevated_privileges?: boolean;
     package_manager?: string;
-    targets?: string[];
+    targets?: string[] | { paths?: string[]; hosts?: string[] };
+    exec?: {
+      argv0?: string;
+      argv?: string[];
+      cwd?: string;
+    };
+    side_effects?: {
+      writes_possible?: boolean;
+      network_possible?: boolean;
+    };
   };
+  templateVars?: Record<string, string>;
   provenance?: {
     source?: 'marketplace' | 'internal' | 'git' | 'unknown';
     publisher?: string;
@@ -125,6 +135,13 @@ export interface ExecutionDecision {
     result: 'matched' | 'skipped';
     decision?: string;
     explanation?: string;
+    condition_details?: {
+      field: string;
+      operator: string;
+      expected: unknown;
+      actual: unknown;
+      result: boolean;
+    }[];
   }[];
   explanation?: string;
   auto_allowed_in_core?: boolean;

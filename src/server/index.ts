@@ -1,5 +1,5 @@
 /**
- * Wombat Server Entry Point
+ * Clasper Server Entry Point
  * 
  * Security enhancements inspired by OpenClaw 2026.2.1:
  * - TLS 1.3 minimum for all HTTPS connections
@@ -68,16 +68,31 @@ import { getSkillEnvironmentUsage, getSkillUsageStats, getPermissionDiff } from 
 import { listToolRegistry, getToolDetails } from "../lib/ops/toolOps.js";
 import { getCostDashboard, getRiskDashboard } from "../lib/ops/dashboards.js";
 // Governance
-import { getAuditLog, auditLog, logPolicyCreatedFromTrace } from "../lib/governance/auditLog.js";
+import {
+  getAuditLog,
+  auditLog,
+  logPolicyCreatedFromTrace,
+  logPolicyCreatedViaWizard,
+  logPolicyUpdatedViaWizard,
+} from "../lib/governance/auditLog.js";
+import type { WizardAuditMeta } from "../lib/governance/auditLog.js";
+import {
+  normalizeOutcomeFromDecision,
+  normalizeWizardMeta,
+  isUnsafeAllowWizardMeta,
+  buildPolicySummaryForAudit,
+  hashWizardMetaAttestation,
+  hashPolicySummary,
+} from "../lib/governance/wizardMeta.js";
 import { OverrideSchema, type OverrideRequest } from "../lib/ops/overrides.js";
 import { getBudgetManager } from "../lib/governance/budgetManager.js";
 import { calculateRiskScore, type RiskScoringInput } from "../lib/governance/riskScoring.js";
 import { evaluateExecutionDecision } from "../lib/governance/executionDecision.js";
 import { evaluatePolicy } from "../lib/governance/policyEngine.js";
-import { createDecision, getDecision, getLatestDecisionForExecution, listPendingDecisions, resolveDecision } from "../lib/governance/decisions.js";
+import { createDecision, getDecision, getLatestDecisionForExecution, listDecisions, listPendingDecisions, resolveDecision } from "../lib/governance/decisions.js";
 import { createExportBundle } from "../lib/exports/exportBundle.js";
 import { PolicySchema } from "../lib/policy/policySchema.js";
-import { deletePolicy, listPolicies, setPolicyEnabled, upsertPolicy } from "../lib/policy/policyStore.js";
+import { deletePolicy, getPolicy, listPolicies, setPolicyEnabled, upsertPolicy } from "../lib/policy/policyStore.js";
 import { ingestAudit, ingestCost, ingestMetrics, ingestTrace, ingestViolation } from "../lib/adapters/ingest.js";
 import { requireAdapterContextFromHeaders, AdapterAuthError, type AdapterAuthContext } from "../lib/adapters/auth.js";
 import { getAdapterRegistry } from "../lib/adapters/registry.js";
@@ -112,17 +127,155 @@ const WebhookSchema = z.object({
 });
 
 const STARTUP_BANNER = `
-   ____ _                              ___
-  / ___| | __ _ ___ _ __   ___ _ __  / _ \\  _ __  ___
- | |   | |/ _\` / __| '_ \\ / _ \\ '__|| | | || '_ \\/ __|
- | |___| | (_| \\__ \\ |_) |  __/ |   | |_| || |_) \\__ \\
-  \\____|_|\\__,_|___/ .__/ \\___|_|    \\___/ | .__/|___/
-                   |_|                     |_|
+   ____ _                              ____
+  / ___| | __ _ ___ _ __   ___ _ __  / ___|___  _ __ ___
+ | |   | |/ _\` / __| '_ \\ / _ \\ '__|| |   / _ \\| '__/ _ \\
+ | |___| | (_| \\__ \\ |_) |  __/ |   | |__| (_) | | |  __/
+  \\____|_|\\__,_|___/ .__/ \\___|_|    \\____\\___/|_|  \\___|
+                   |_|
   🛡️  Governance & Audit
   ───────────────────────────────────────────────────────
 `;
 
 const TRACE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function asStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function asStringRecord(value: unknown): Record<string, string> | undefined {
+  const obj = asObject(value);
+  if (!obj) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(obj)) {
+    if (typeof raw === "string") out[key] = raw;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function buildPolicyContextFromDecisionRecord(
+  decision: ReturnType<typeof getDecision>
+):
+  | {
+      tenant_id: string;
+      workspace_id?: string;
+      environment?: string;
+      tool?: string;
+      tool_group?: string;
+      adapter_id?: string;
+      adapter_risk_class?: string;
+      skill_state?: string;
+      risk_level?: string;
+      estimated_cost?: number;
+      requested_capabilities?: string[];
+      intent?: string;
+      context?: {
+        external_network?: boolean;
+        writes_files?: boolean;
+        elevated_privileges?: boolean;
+        package_manager?: string;
+        targets?: string[] | { paths?: string[]; hosts?: string[] };
+        exec?: {
+          argv0?: string;
+          argv?: string[];
+          cwd?: string;
+        };
+        side_effects?: {
+          writes_possible?: boolean;
+          network_possible?: boolean;
+        };
+      };
+      templateVars?: Record<string, string>;
+      provenance?: {
+        source?: string;
+        publisher?: string;
+      };
+    }
+  | null {
+  if (!decision) return null;
+  const snapshot = asObject(decision.request_snapshot);
+  const requestData = asObject(snapshot?.request);
+  if (!requestData) return null;
+  const requestContext = asObject(requestData.context);
+  const execContext = asObject(requestContext?.exec);
+  const sideEffects = asObject(requestContext?.side_effects);
+  const targetsRaw = requestContext?.targets;
+  const targetsObj = asObject(targetsRaw);
+  const targetsArray = asStringArray(targetsRaw);
+  const targetsPaths = asStringArray(targetsObj?.paths);
+  const targetsHosts = asStringArray(targetsObj?.hosts);
+
+  return {
+    tenant_id: decision.tenant_id,
+    workspace_id: decision.workspace_id,
+    environment: typeof requestData.environment === "string" ? requestData.environment : undefined,
+    tool: typeof requestData.tool === "string" ? requestData.tool : undefined,
+    tool_group: typeof requestData.tool_group === "string" ? requestData.tool_group : undefined,
+    adapter_id: decision.adapter_id,
+    adapter_risk_class:
+      typeof requestData.adapter_risk_class === "string"
+        ? requestData.adapter_risk_class
+        : undefined,
+    skill_state: typeof requestData.skill_state === "string" ? requestData.skill_state : undefined,
+    risk_level: typeof requestData.risk_level === "string" ? requestData.risk_level : undefined,
+    estimated_cost:
+      typeof requestData.estimated_cost === "number" ? requestData.estimated_cost : undefined,
+    requested_capabilities: asStringArray(requestData.requested_capabilities),
+    intent: typeof requestData.intent === "string" ? requestData.intent : undefined,
+    context: {
+      external_network:
+        typeof requestContext?.external_network === "boolean"
+          ? (requestContext.external_network as boolean)
+          : undefined,
+      writes_files:
+        typeof requestContext?.writes_files === "boolean"
+          ? (requestContext.writes_files as boolean)
+          : undefined,
+      elevated_privileges:
+        typeof requestContext?.elevated_privileges === "boolean"
+          ? (requestContext.elevated_privileges as boolean)
+          : undefined,
+      package_manager:
+        typeof requestContext?.package_manager === "string"
+          ? (requestContext.package_manager as string)
+          : undefined,
+      targets:
+        targetsPaths || targetsHosts
+          ? { paths: targetsPaths, hosts: targetsHosts }
+          : targetsArray,
+      exec: {
+        argv0: typeof execContext?.argv0 === "string" ? (execContext.argv0 as string) : undefined,
+        argv: asStringArray(execContext?.argv),
+        cwd: typeof execContext?.cwd === "string" ? (execContext.cwd as string) : undefined,
+      },
+      side_effects: {
+        writes_possible:
+          typeof sideEffects?.writes_possible === "boolean"
+            ? (sideEffects.writes_possible as boolean)
+            : undefined,
+        network_possible:
+          typeof sideEffects?.network_possible === "boolean"
+            ? (sideEffects.network_possible as boolean)
+            : undefined,
+      },
+    },
+    templateVars: asStringRecord(requestData.templateVars),
+    provenance: (() => {
+      const p = asObject(requestData.provenance);
+      if (!p) return undefined;
+      return {
+        source: typeof p.source === "string" ? p.source : undefined,
+        publisher: typeof p.publisher === "string" ? p.publisher : undefined,
+      };
+    })(),
+  };
+}
 
 export function buildApp() {
   const isDev = process.stdout.isTTY;
@@ -849,11 +1002,101 @@ export function buildApp() {
       return reply.send({
         entries: result.entries.map(entry => {
           const ed = entry.eventData as Record<string, unknown>;
+          const decisionId = typeof ed["decision_id"] === "string" ? ed["decision_id"] : undefined;
           const executionId = typeof ed["execution_id"] === "string" ? ed["execution_id"] : undefined;
           const policyId = typeof ed["policy_id"] === "string" ? ed["policy_id"] : undefined;
           const skillId = typeof ed["skill_id"] === "string" ? ed["skill_id"] : undefined;
           const adapterId = typeof ed["adapter_id"] === "string" ? ed["adapter_id"] : undefined;
-          const targetId = entry.traceId || executionId || policyId || skillId || adapterId;
+          const tool = typeof ed["tool"] === "string" ? ed["tool"] : undefined;
+          const targets = Array.isArray(ed["targets"])
+            ? (ed["targets"] as unknown[]).filter((v): v is string => typeof v === "string")
+            : [];
+          const actorLabel =
+            entry.userId ||
+            (typeof ed["approved_by"] === "string" ? ed["approved_by"] : undefined) ||
+            (typeof ed["requested_by"] === "string" ? ed["requested_by"] : undefined) ||
+            (adapterId ? `adapter:${adapterId}` : "system");
+          const actionSummary = (() => {
+            if (entry.eventType === "policy_decision_pending") {
+              return `Approval requested${tool ? ` for ${tool}` : ""}`;
+            }
+            if (entry.eventType === "policy_decision_resolved") {
+              const status = typeof ed["status"] === "string" ? ed["status"] : "resolved";
+              return `Approval ${status}${tool ? ` for ${tool}` : ""}`;
+            }
+            if (entry.eventType === "adapter_audit_event") {
+              const nestedType = typeof ed["event_type"] === "string" ? ed["event_type"] : "adapter_event";
+              return `Adapter event: ${nestedType}`;
+            }
+            if (entry.eventType === "approval_auto_allowed_in_core") {
+              return "Auto-approved by Core simulate mode";
+            }
+            return entry.eventType.replaceAll("_", " ");
+          })();
+          const decisionRecord = decisionId ? getDecision(decisionId) : null;
+          const originalRequest = (() => {
+            const snapshot = decisionRecord?.request_snapshot as Record<string, unknown> | null | undefined;
+            const request = snapshot && typeof snapshot === "object"
+              ? (snapshot["request"] as Record<string, unknown> | undefined)
+              : undefined;
+            if (!request || typeof request !== "object") return null;
+            const reqTargets = Array.isArray((request["context"] as Record<string, unknown> | undefined)?.["targets"])
+              ? (((request["context"] as Record<string, unknown>)["targets"] as unknown[]).filter((v): v is string => typeof v === "string"))
+              : [];
+            const requestedCapabilities = Array.isArray(request["requested_capabilities"])
+              ? ((request["requested_capabilities"] as unknown[]).filter((v): v is string => typeof v === "string"))
+              : [];
+            return {
+              tool: typeof request["tool"] === "string" ? request["tool"] : null,
+              tool_group: typeof request["tool_group"] === "string" ? request["tool_group"] : null,
+              intent: typeof request["intent"] === "string" ? request["intent"] : null,
+              requested_capabilities: requestedCapabilities,
+              targets: reqTargets,
+              adapter_id: typeof request["adapter_id"] === "string" ? request["adapter_id"] : null,
+              raw: request,
+            };
+          })();
+          const originalPolicy = (() => {
+            const snapshot = decisionRecord?.request_snapshot as Record<string, unknown> | null | undefined;
+            const policy = snapshot && typeof snapshot === "object"
+              ? (snapshot["decision"] as Record<string, unknown> | undefined)
+              : undefined;
+            if (!policy || typeof policy !== "object") return null;
+            const matchedPolicies = Array.isArray(policy["matched_policies"])
+              ? ((policy["matched_policies"] as unknown[]).filter((v): v is string => typeof v === "string"))
+              : [];
+            return {
+              decision: typeof policy["decision"] === "string" ? policy["decision"] : null,
+              blocked_reason: typeof policy["blocked_reason"] === "string" ? policy["blocked_reason"] : null,
+              explanation: typeof policy["explanation"] === "string" ? policy["explanation"] : null,
+              matched_policies: matchedPolicies,
+              raw: policy,
+            };
+          })();
+          const requestTargets = Array.isArray(originalRequest?.targets)
+            ? (originalRequest.targets as unknown[]).filter((v): v is string => typeof v === "string")
+            : [];
+          const targetId = entry.traceId || decisionId || executionId || policyId || skillId || adapterId;
+          const targetType = entry.traceId
+            ? "trace"
+            : decisionId
+              ? "decision"
+              : executionId
+                ? "execution"
+                : policyId
+                  ? "policy"
+                  : skillId
+                    ? "skill"
+                    : adapterId
+                      ? "adapter"
+                      : "unknown";
+          const bestTargets = targets.length > 0 ? targets : requestTargets;
+          const targetSummary =
+            bestTargets.length > 0
+              ? bestTargets.join(", ")
+              : targetId
+                ? `${targetType}:${targetId}`
+                : null;
 
           return {
             id: entry.id,
@@ -862,7 +1105,13 @@ export function buildApp() {
             workspace_id: entry.workspaceId,
             trace_id: entry.traceId,
             user_id: entry.userId,
+            actor: actorLabel,
             target_id: targetId,
+            target_type: targetType,
+            target_summary: targetSummary,
+            action_summary: actionSummary,
+            original_request: originalRequest,
+            original_policy: originalPolicy,
             event_data: entry.eventData,
             created_at: entry.createdAt
           };
@@ -1232,9 +1481,31 @@ export function buildApp() {
         writes_files: z.boolean().optional(),
         elevated_privileges: z.boolean().optional(),
         package_manager: z.string().optional(),
-        targets: z.array(z.string()).optional(),
+        targets: z
+          .union([
+            z.array(z.string()),
+            z.object({
+              paths: z.array(z.string()).optional(),
+              hosts: z.array(z.string()).optional(),
+            }),
+          ])
+          .optional(),
+        exec: z
+          .object({
+            argv0: z.string().optional(),
+            argv: z.array(z.string()).optional(),
+            cwd: z.string().optional(),
+          })
+          .optional(),
+        side_effects: z
+          .object({
+            writes_possible: z.boolean().optional(),
+            network_possible: z.boolean().optional(),
+          })
+          .optional(),
       })
       .optional(),
+    templateVars: z.record(z.string()).optional(),
     provenance: z
       .object({
         source: z.enum(['marketplace', 'internal', 'git', 'unknown']).optional(),
@@ -1264,6 +1535,14 @@ export function buildApp() {
     ) {
       throw new Error("Adapter scope mismatch");
     }
+  };
+
+  const extractTargetPaths = (
+    context: { targets?: string[] | { paths?: string[] } } | undefined
+  ): string[] => {
+    if (!context?.targets) return [];
+    if (Array.isArray(context.targets)) return context.targets;
+    return context.targets.paths || [];
   };
 
   const resolveTelemetryPayload = (
@@ -1384,6 +1663,7 @@ export function buildApp() {
         auditLog("policy_decision_pending", {
           tenantId: parsed.data.tenant_id,
           workspaceId: parsed.data.workspace_id,
+          userId: `adapter:${parsed.data.adapter_id}`,
           traceId: undefined,
           eventData: {
             decision_id: created.decision_id,
@@ -1391,6 +1671,10 @@ export function buildApp() {
             execution_id: decision.execution_id,
             required_role: created.required_role,
             expires_at: created.expires_at,
+            tool: parsed.data.tool || null,
+            tool_group: parsed.data.tool_group || null,
+            targets: extractTargetPaths(parsed.data.context),
+            intent: parsed.data.intent || null,
           },
         });
 
@@ -1779,6 +2063,102 @@ export function buildApp() {
     }
   });
 
+  const reconcilePendingDecisionsForAllowPolicies = async (params: {
+    tenantId: string;
+    workspaceId?: string;
+    userId?: string;
+    opsContext: Awaited<ReturnType<typeof requireOpsContextFromHeaders>>;
+    requestLog: { warn: (obj: Record<string, unknown>) => void };
+    reason: "policy_exception_created" | "policy_exception_refresh_scan";
+  }) => {
+    const pending = listPendingDecisions({
+      tenantId: params.tenantId,
+      workspaceId: params.workspaceId,
+    });
+    const resolvedDecisionIds: string[] = [];
+    for (const pendingDecision of pending) {
+      if (!canAccessWorkspace(params.opsContext, pendingDecision.workspace_id)) continue;
+      const policyContext = buildPolicyContextFromDecisionRecord(pendingDecision);
+      if (!policyContext) continue;
+      const policyResult = evaluatePolicy(policyContext);
+      if (policyResult.decision !== "allow") continue;
+
+      const resolution = {
+        approval_type: "local",
+        trust_level: "self_attested",
+        approved_by: params.userId || "local_operator",
+        cloud_authority: false,
+        policy_decision: policyResult.decision,
+        matched_policy_ids: policyResult.matched_policies,
+        policy_explanation: policyResult.explanation || null,
+        policy_decision_trace: policyResult.decision_trace,
+        note:
+          params.reason === "policy_exception_created"
+            ? "Auto-approved after exception rule creation"
+            : "Auto-approved after exception refresh scan",
+        justification: params.reason,
+        resolved_at: new Date().toISOString(),
+      };
+      const updated = resolveDecision({
+        decisionId: pendingDecision.decision_id,
+        status: "approved",
+        resolution,
+      });
+      if (!updated) continue;
+      resolvedDecisionIds.push(updated.decision_id);
+
+      auditLog("policy_decision_resolved", {
+        tenantId: updated.tenant_id,
+        workspaceId: updated.workspace_id,
+        userId: params.userId,
+        eventData: {
+          decision_id: updated.decision_id,
+          execution_id: updated.execution_id,
+          adapter_id: updated.adapter_id,
+          status: updated.status,
+          approved_by: params.userId || "local_operator",
+          tool:
+            ((updated.request_snapshot as Record<string, unknown> | null)?.request as Record<string, unknown> | undefined)
+              ?.tool || null,
+          targets: extractTargetPaths(
+            ((updated.request_snapshot as Record<string, unknown> | null)?.request as Record<string, unknown> | undefined)
+              ?.context as Record<string, unknown> | undefined
+          ),
+          approval_type: "local",
+          trust_level: "self_attested",
+          cloud_authority: false,
+          resolution_source: params.reason,
+        },
+      });
+
+      if (updated.callback_url) {
+        try {
+          await fetch(updated.callback_url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              decision_id: updated.decision_id,
+              status: updated.status,
+              execution_id: updated.execution_id,
+            }),
+          });
+        } catch (e) {
+          params.requestLog.warn({
+            msg: "decision callback_url notify failed after policy reconcile",
+            decision_id: updated.decision_id,
+            error: String(e),
+          });
+        }
+      }
+    }
+
+    return {
+      checkedCount: pending.length,
+      resolvedDecisionIds,
+      resolvedCount: resolvedDecisionIds.length,
+    };
+  };
+
   app.post("/ops/api/policies", async (request, reply) => {
     try {
       const context = await requireOpsContextFromHeaders(request.headers);
@@ -1793,9 +2173,11 @@ export function buildApp() {
         typeof body._source_adapter_id === "string" && body._source_adapter_id.length > 0
           ? body._source_adapter_id
           : undefined;
+      const rawWizardMeta = body._wizard_meta;
       const {
         _source_trace_id: _stripSourceTraceId,
         _source_adapter_id: _stripSourceAdapterId,
+        _wizard_meta: _stripWizardMeta,
         ...policyPayload
       } = body;
       const parsed = PolicySchema.safeParse(policyPayload);
@@ -1808,20 +2190,171 @@ export function buildApp() {
         return reply.status(403).send({ error: "Tenant access denied" });
       }
 
-      const record = upsertPolicy({ tenantId, policy: parsed.data });
-      if (sourceTraceId) {
+      const existingPolicy = getPolicy(tenantId, parsed.data.policy_id);
+      const previousWizardMeta =
+        existingPolicy?._wizard_meta &&
+        typeof existingPolicy._wizard_meta === "object" &&
+        !Array.isArray(existingPolicy._wizard_meta)
+          ? (existingPolicy._wizard_meta as unknown as WizardAuditMeta)
+          : null;
+      const fallbackOutcome = normalizeOutcomeFromDecision(parsed.data.effect?.decision);
+      const wizardMeta = normalizeWizardMeta({
+        input: rawWizardMeta,
+        fallbackOutcome,
+        tenantId,
+        workspaceId: parsed.data.scope?.workspace_id,
+        actorUserId: context.userId,
+        previousMeta: previousWizardMeta,
+        isEdit: Boolean(existingPolicy),
+      });
+      if (isUnsafeAllowWizardMeta(wizardMeta)) {
+        return reply.status(400).send({
+          error: "Allow rules created via wizard require explicit acknowledgment",
+          code: "wizard_allow_ack_required",
+        });
+      }
+
+      const policyToPersist = {
+        ...parsed.data,
+        _wizard_meta: (() => {
+          const base = (wizardMeta as unknown as Record<string, unknown>) ?? existingPolicy?._wizard_meta ?? undefined;
+          const raw = rawWizardMeta && typeof rawWizardMeta === "object" && !Array.isArray(rawWizardMeta)
+            ? (rawWizardMeta as Record<string, unknown>)
+            : null;
+          const existingMeta = existingPolicy?._wizard_meta && typeof existingPolicy._wizard_meta === "object" && !Array.isArray(existingPolicy._wizard_meta)
+            ? (existingPolicy._wizard_meta as Record<string, unknown>)
+            : null;
+          const exceptionFor =
+            (typeof raw?.exception_for_policy_id === "string" && raw.exception_for_policy_id) ||
+            (typeof existingMeta?.exception_for_policy_id === "string" && existingMeta.exception_for_policy_id);
+          if (typeof exceptionFor === "string" && exceptionFor.length > 0 && base && typeof base === "object") {
+            return { ...base, exception_for_policy_id: exceptionFor };
+          }
+          return base;
+        })(),
+      };
+      const policySummaryBefore = existingPolicy
+        ? buildPolicySummaryForAudit(existingPolicy as unknown as Record<string, unknown>)
+        : null;
+      const policySummaryBeforeHash = policySummaryBefore ? hashPolicySummary(policySummaryBefore) : null;
+      const record = upsertPolicy({ tenantId, policy: policyToPersist });
+      const policySummary = buildPolicySummaryForAudit(record as unknown as Record<string, unknown>);
+      const policySummaryAfterHash = hashPolicySummary(policySummary);
+      const wizardMetaHash = wizardMeta
+        ? hashWizardMetaAttestation({ wizardMeta, policySummary })
+        : null;
+      const isUpdate = Boolean(existingPolicy);
+      let sourceDecisionResolution: {
+        decision_id?: string;
+        source_trace_id?: string;
+        resolved: boolean;
+        status_before?: string;
+        status_after?: string;
+        reason?: string;
+      } | null = null;
+
+      if (!isUpdate && sourceTraceId) {
         logPolicyCreatedFromTrace({
           tenantId,
           workspaceId: record.workspace_id ?? undefined,
           policyId: record.policy_id,
           sourceTraceId,
-          tool: record.conditions?.tool,
+          tool: typeof record.conditions?.tool === 'string' ? record.conditions.tool : undefined,
           decision: record.effect?.decision ?? "",
           precedence: record.precedence,
           adapterId: sourceAdapterId,
+          wizardMeta: wizardMeta ?? undefined,
+          policySummary,
+          wizardMetaHash: wizardMetaHash ?? undefined,
         });
       }
-      return reply.send({ policy: record });
+      if (!isUpdate && wizardMeta) {
+        logPolicyCreatedViaWizard({
+          tenantId,
+          workspaceId: record.workspace_id ?? undefined,
+          sourceTraceId,
+          policyId: record.policy_id,
+          tool: typeof record.conditions?.tool === 'string' ? record.conditions.tool : undefined,
+          decision: record.effect?.decision ?? "",
+          precedence: record.precedence,
+          adapterId: sourceAdapterId,
+          wizardMeta,
+          policySummary,
+          wizardMetaHash: wizardMetaHash ?? undefined,
+        });
+      } else if (isUpdate && wizardMeta) {
+        const diffHint: string[] = [];
+        if (policySummaryBefore?.effect !== policySummary.effect) diffHint.push("effect");
+        if (policySummaryBefore?.precedence !== policySummary.precedence) diffHint.push("precedence");
+        if (
+          JSON.stringify(policySummaryBefore?.scope ?? {}) !== JSON.stringify(policySummary.scope ?? {})
+        ) {
+          diffHint.push("scope");
+        }
+        if (
+          JSON.stringify(policySummaryBefore?.key_conditions ?? {}) !==
+          JSON.stringify(policySummary.key_conditions ?? {})
+        ) {
+          diffHint.push("conditions");
+        }
+        logPolicyUpdatedViaWizard({
+          tenantId,
+          workspaceId: record.workspace_id ?? undefined,
+          sourceTraceId,
+          policyId: record.policy_id,
+          tool: typeof record.conditions?.tool === "string" ? record.conditions.tool : undefined,
+          decision: record.effect?.decision ?? "",
+          precedence: record.precedence,
+          adapterId: sourceAdapterId,
+          actorUserId: context.userId,
+          wizardMeta,
+          wizardMetaHash: wizardMetaHash ?? undefined,
+          policySummaryBefore: policySummaryBefore ?? undefined,
+          policySummaryAfter: policySummary,
+          policySummaryBeforeHash: policySummaryBeforeHash ?? undefined,
+          policySummaryAfterHash: policySummaryAfterHash,
+          diffHint,
+        });
+      }
+      let resolvedDecisionIds: string[] = [];
+      let resolvedDecisionCount = 0;
+      if (record.effect?.decision === "allow") {
+        const sourceBefore = sourceTraceId ? getDecision(sourceTraceId) : null;
+        const reconcileResult = await reconcilePendingDecisionsForAllowPolicies({
+          tenantId,
+          workspaceId: record.workspace_id ?? undefined,
+          userId: context.userId,
+          opsContext: context,
+          requestLog: request.log,
+          reason: "policy_exception_created",
+        });
+        resolvedDecisionIds = reconcileResult.resolvedDecisionIds;
+        resolvedDecisionCount = reconcileResult.resolvedCount;
+        if (sourceTraceId) {
+          const sourceAfter = getDecision(sourceTraceId);
+          if (sourceBefore && sourceBefore.tenant_id === tenantId) {
+            sourceDecisionResolution = {
+              decision_id: sourceBefore.decision_id,
+              source_trace_id: sourceTraceId,
+              resolved: Boolean(
+                sourceBefore.status === "pending" && sourceAfter?.status === "approved"
+              ),
+              status_before: sourceBefore.status,
+              status_after: sourceAfter?.status ?? sourceBefore.status,
+              reason:
+                sourceBefore.status === "pending" && sourceAfter?.status === "approved"
+                  ? "policy_exception_created"
+                  : undefined,
+            };
+          }
+        }
+      }
+      return reply.send({
+        policy: record,
+        source_decision: sourceDecisionResolution,
+        resolved_decision_ids: resolvedDecisionIds,
+        resolved_decision_count: resolvedDecisionCount,
+      });
     } catch (error) {
       if (error instanceof PermissionError) {
         return reply.status(403).send({
@@ -1991,7 +2524,8 @@ export function buildApp() {
       const QuerySchema = z.object({
         tenant_id: z.string().optional(),
         workspace_id: z.string().optional(),
-        status: z.enum(["pending"]).optional(),
+        status: z.enum(["pending", "approved", "denied", "expired"]).optional(),
+        limit: z.coerce.number().int().min(1).max(500).optional(),
       });
 
       const parsed = QuerySchema.safeParse(request.query);
@@ -2004,12 +2538,15 @@ export function buildApp() {
         return reply.status(403).send({ error: "Tenant access denied" });
       }
 
-      const pending = listPendingDecisions({
+      const status = parsed.data.status || "pending";
+      const records = listDecisions({
         tenantId,
         workspaceId: parsed.data.workspace_id,
+        status,
+        limit: parsed.data.limit,
       });
 
-      return reply.send({ decisions: pending });
+      return reply.send({ decisions: records });
     } catch (error) {
       if (error instanceof PermissionError) {
         return reply.status(403).send({
@@ -2027,6 +2564,63 @@ export function buildApp() {
         return reply.status(status).send({ error: error.message, code: error.code });
       }
       return reply.status(500).send({ error: "Failed to load decisions" });
+    }
+  });
+
+  app.post("/ops/api/decisions/reconcile", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "decision:resolve");
+
+      const BodySchema = z.object({
+        tenant_id: z.string().optional(),
+        workspace_id: z.string().optional(),
+      });
+      const parsedBody = BodySchema.safeParse(request.body);
+      if (!parsedBody.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsedBody.error.flatten() });
+      }
+
+      const tenantId = parsedBody.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+      if (parsedBody.data.workspace_id && !canAccessWorkspace(context, parsedBody.data.workspace_id)) {
+        return reply.status(403).send({ error: "Workspace access denied" });
+      }
+
+      const reconcileResult = await reconcilePendingDecisionsForAllowPolicies({
+        tenantId,
+        workspaceId: parsedBody.data.workspace_id,
+        userId: context.userId,
+        opsContext: context,
+        requestLog: request.log,
+        reason: "policy_exception_refresh_scan",
+      });
+
+      return reply.send({
+        checked_count: reconcileResult.checkedCount,
+        resolved_count: reconcileResult.resolvedCount,
+        resolved_decision_ids: reconcileResult.resolvedDecisionIds,
+      });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Failed to reconcile pending decisions";
+      return reply.status(500).send({ error: message });
     }
   });
 
@@ -2085,11 +2679,19 @@ export function buildApp() {
       auditLog("policy_decision_resolved", {
         tenantId: updated.tenant_id,
         workspaceId: updated.workspace_id,
+        userId: context.userId,
         eventData: {
           decision_id: updated.decision_id,
           execution_id: updated.execution_id,
           adapter_id: updated.adapter_id,
           status: updated.status,
+          approved_by: context.userId || "local_operator",
+          tool:
+            ((record.request_snapshot as Record<string, unknown> | null)?.request as Record<string, unknown> | undefined)
+              ?.tool || null,
+          targets:
+            ((((record.request_snapshot as Record<string, unknown> | null)?.request as Record<string, unknown> | undefined)
+              ?.context as Record<string, unknown> | undefined)?.targets as string[] | undefined) || [],
           approval_type: "local",
           trust_level: "self_attested",
           cloud_authority: false,
@@ -2341,7 +2943,8 @@ export function buildApp() {
         port: config.port,
         defaultTask: config.defaultTaskTitle || "(not set)",
         model: config.openaiModelDefault,
-        fallbackModel: config.openaiModelFallback || "(not set)"
+        fallbackModel: config.openaiModelFallback || "(not set)",
+        policyOperatorsEnabled: config.policyOperatorsEnabled,
       }
     };
   });
@@ -2358,14 +2961,14 @@ export function buildApp() {
   });
 
   /**
-   * Wombat version and contract information.
+   * Clasper version and contract information.
    * GET /api/version
    */
   app.get("/api/version", async () => {
     return {
       version: "1.2.1",
       contract_version: CLASPER_CONTRACT_VERSION,
-      name: "Wombat Ops",
+      name: "Clasper Ops",
       features: [
         "traces",
         "trace_diff",

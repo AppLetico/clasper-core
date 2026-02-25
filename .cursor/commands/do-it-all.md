@@ -1,5 +1,4 @@
-for clasper-core run unit tests and fix any issues
-for clasper-core run build and fix any issues
+for clasper-core run build (npm run build), lint (npm run lint), and tests (npm test), and fix any issues so CI would pass
 
 for clasper-control-plane-starter run tests (make test / pytest) and fix any issues
 

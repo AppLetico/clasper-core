@@ -1,6 +1,6 @@
 # Mission Control Lite (Reference Backend)
 
-Minimal reference implementation of the Wombat Control Plane Contract (v1).
+Minimal reference implementation of the Clasper Control Plane Contract (v1).
 
 ## Features
 

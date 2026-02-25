@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Initialize a Wombat workspace from the built-in template.
- * Creates workspace/ (or WOMBAT_WORKSPACE) with AGENTS.md, SOUL.md, etc.
+ * Initialize a Clasper workspace from the built-in template.
+ * Creates workspace/ (or CLASPER_WORKSPACE) with AGENTS.md, SOUL.md, etc.
  * Skips existing files unless --force.
  */
 import fs from "node:fs";
@@ -13,7 +13,7 @@ const repoRoot = path.join(__dirname, "..");
 const templateDir = path.join(repoRoot, "templates", "workspace");
 
 const force = process.argv.includes("--force");
-const targetDir = process.env.WOMBAT_WORKSPACE || path.join(process.cwd(), "workspace");
+const targetDir = process.env.CLASPER_WORKSPACE || path.join(process.cwd(), "workspace");
 
 function copyRecursive(src: string, dest: string): { created: string[]; skipped: string[] } {
   const created: string[] = [];
