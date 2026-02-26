@@ -23,6 +23,7 @@
     "patch:exception-link": "tsx scripts/patch-exception-link.ts",
     "cli": "tsx src/cli.ts",
     "lint": "echo \"no lint\"",
+    "typecheck": "tsc --noEmit",
     "build:ops": "esbuild src/ops-ui/src/index.jsx --bundle --outfile=src/ops-ui/dist/app.js --format=esm --jsx=automatic --jsx-import-source=preact --minify",
     "dev:ops": "node scripts/dev-ops.mjs",
     "build:favicon-ico": "node scripts/build-favicon-ico.mjs"
