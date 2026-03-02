@@ -39,3 +39,8 @@ Thumbs.db
 # Test artifacts
 .test-db/
 conformance-results/
+coverage/
+*.lcov
+
+# Prscope (planning + upstream PR tooling)
+.prscope/

@@ -3,6 +3,9 @@
   "version": "1.2.1",
   "description": "Local governance core for AI execution (single-tenant, self-attested).",
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "bin": {
     "clasper": "dist/cli.js",
@@ -24,6 +27,7 @@
     "cli": "tsx src/cli.ts",
     "lint": "echo \"no lint\"",
     "typecheck": "tsc --noEmit",
+    "ci": "npm run typecheck && npm run lint && npm test",
     "build:ops": "esbuild src/ops-ui/src/index.jsx --bundle --outfile=src/ops-ui/dist/app.js --format=esm --jsx=automatic --jsx-import-source=preact --minify",
     "dev:ops": "node scripts/dev-ops.mjs",
     "build:favicon-ico": "node scripts/build-favicon-ico.mjs"

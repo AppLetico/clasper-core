@@ -106,6 +106,11 @@ npm run seed:ops
 
 Open the Ops UI at `http://localhost:8081/ops`.
 
+## Development
+
+- **Node**: Use Node 20 (see `.nvmrc`). Run `nvm use` or `nodenv install` if you use them.
+- **Pre-push**: Run `npm run ci` to typecheck, lint, and test (matches CI).
+
 ## Two Ways to Deploy
 
 | Mode | Description |
