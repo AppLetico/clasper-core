@@ -28,8 +28,10 @@ upstream_eval:
   max_tokens: 3000
 
 planning:
-  author_model: gpt-5.3-codex
-  critic_model: gpt-5.2
+  # author_model: gpt-5.3-codex
+  # critic_model: gpt-5.2
+  author_model: gpt-4o-mini
+  critic_model: gpt-4o-mini 
   max_adversarial_rounds: 10
   convergence_threshold: 0.05
   output_dir: ./plans
