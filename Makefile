@@ -1,7 +1,7 @@
 # Clasper - common targets for dev and CI
 # Use: make setup (first time), make dev, make workspace, make test, etc.
 
-.PHONY: install dev build test setup workspace clean conformance dispatcher build-ops seed-ops dev-seeded seed-ops-seeded reset-db reset-seeded-db reset-reseed-ops-seeded seed-openclaw-policies demo-openclaw
+.PHONY: install dev build test lint-typecheck ci setup workspace clean conformance dispatcher build-ops seed-ops dev-seeded seed-ops-seeded reset-db reset-seeded-db reset-reseed-ops-seeded seed-openclaw-policies demo-openclaw
 
 install:
 	npm install
@@ -78,6 +78,14 @@ build:
 
 test:
 	npm test
+
+# Lint + typecheck only (no tests)
+lint-typecheck:
+	npm run lint && npm run typecheck
+
+# Full CI: typecheck, lint, tests
+ci:
+	npm run ci
 
 # Create a workspace from the built-in template (./workspace, or set CLASPER_WORKSPACE)
 workspace:
