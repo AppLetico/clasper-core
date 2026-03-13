@@ -210,3 +210,73 @@ describe('OpenClaw policy posture', () => {
     expect(Array.isArray(body.covered_tools)).toBe(true);
   });
 });
+
+describe('OpenClaw adapter inspection endpoints', () => {
+  it('returns effective adapter policy summary', async () => {
+    const app = buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/adapter/policies?limit=100',
+      headers: { 'X-Adapter-Token': adapterToken },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { policies?: Array<{ policy_id?: string; decision?: string }> };
+    expect(Array.isArray(body.policies)).toBe(true);
+    const ids = (body.policies || []).map((p) => p.policy_id);
+    expect(ids).toContain('openclaw-fallback-require-approval');
+  });
+
+  it('lists decisions and explains a decision', async () => {
+    const app = buildApp();
+    const decisionRes = await app.inject({
+      method: 'POST',
+      url: '/api/execution/request',
+      headers: { 'X-Adapter-Token': adapterToken },
+      payload: {
+        adapter_id: adapterId,
+        tenant_id: tenantId,
+        workspace_id: workspaceId,
+        requested_capabilities: ['delete'],
+        tool: 'delete',
+        tool_group: 'fs',
+        tool_count: 1,
+        context: { writes_files: true },
+      },
+    });
+    expect(decisionRes.statusCode).toBe(200);
+
+    const listRes = await app.inject({
+      method: 'GET',
+      url: '/api/adapter/decisions?limit=20&decision=deny&since=1h',
+      headers: { 'X-Adapter-Token': adapterToken },
+    });
+    expect(listRes.statusCode).toBe(200);
+    const listBody = listRes.json() as {
+      decisions?: Array<{ decision_id?: string; decision?: string; policy?: string | null; tool?: string | null }>;
+    };
+    expect(Array.isArray(listBody.decisions)).toBe(true);
+    const first = (listBody.decisions || [])[0];
+    expect(first).toBeDefined();
+    expect(first?.decision).toBe('deny');
+
+    const explainRes = await app.inject({
+      method: 'GET',
+      url: `/api/adapter/decisions/${first?.decision_id}/explain`,
+      headers: { 'X-Adapter-Token': adapterToken },
+    });
+    expect(explainRes.statusCode).toBe(200);
+    const explainBody = explainRes.json() as {
+      policy?: string | null;
+      reason?: string;
+      tool?: string | null;
+      decision?: string;
+      input_summary?: Record<string, unknown>;
+    };
+    expect(explainBody.decision).toBe('deny');
+    expect(explainBody.tool).toBe('delete');
+    expect(typeof explainBody.reason).toBe('string');
+    expect(explainBody.reason?.length).toBeGreaterThan(0);
+    expect(explainBody.policy).toBeTruthy();
+    expect(typeof explainBody.input_summary).toBe('object');
+  });
+});

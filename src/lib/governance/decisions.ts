@@ -20,6 +20,29 @@ export interface DecisionRecord {
   updated_at: string;
 }
 
+function enforceDecisionRowCap(): void {
+  const raw = process.env.CLASPER_DECISION_MAX_ROWS;
+  const parsed = raw ? Number.parseInt(raw, 10) : 100000;
+  const maxRows = Number.isFinite(parsed) ? parsed : 100000;
+  if (!Number.isFinite(maxRows) || maxRows <= 0) return;
+  const db = getDatabase();
+  const row = db.prepare('SELECT COUNT(*) AS count FROM decisions').get() as { count?: number } | undefined;
+  const count = row?.count ?? 0;
+  if (count <= maxRows) return;
+  const overflow = count - maxRows;
+  db.prepare(
+    `
+      DELETE FROM decisions
+      WHERE decision_id IN (
+        SELECT decision_id
+        FROM decisions
+        ORDER BY created_at ASC, decision_id ASC
+        LIMIT ?
+      )
+    `
+  ).run(overflow);
+}
+
 export function createDecision(params: {
   tenantId: string;
   workspaceId: string;
@@ -58,6 +81,8 @@ export function createDecision(params: {
     now,
     now
   );
+
+  enforceDecisionRowCap();
 
   return getDecision(decisionId)!;
 }
@@ -102,6 +127,8 @@ export function recordDecision(params: {
     now,
     now
   );
+
+  enforceDecisionRowCap();
 
   return getDecision(decisionId)!;
 }
@@ -166,14 +193,74 @@ export function listDecisions(params: {
   }
 
   const whereClause = conditions.join(' AND ');
-  const orderField = params.status === 'pending' ? 'created_at' : 'updated_at';
-  const orderDirection = 'DESC';
   const rows = db
     .prepare(
       `
       SELECT * FROM decisions
       WHERE ${whereClause}
-      ORDER BY ${orderField} ${orderDirection}
+      ORDER BY created_at DESC, decision_id DESC
+      LIMIT ? OFFSET ?
+    `
+    )
+    .all(...values, limit, offset) as DecisionRow[];
+
+  return rows.map(rowToRecord);
+}
+
+export function listAdapterDecisions(params: {
+  tenantId: string;
+  workspaceId: string;
+  adapterId: string;
+  status?: DecisionStatus;
+  tool?: string;
+  decision?: 'allow' | 'deny' | 'require_approval' | 'pending';
+  policy?: string;
+  since?: string;
+  limit?: number;
+  offset?: number;
+}): DecisionRecord[] {
+  const db = getDatabase();
+  const limit = params.limit ?? 50;
+  const offset = params.offset ?? 0;
+  const conditions = ['tenant_id = ?', 'workspace_id = ?', 'adapter_id = ?'];
+  const values: unknown[] = [params.tenantId, params.workspaceId, params.adapterId];
+
+  if (params.status) {
+    conditions.push('status = ?');
+    values.push(params.status);
+  }
+  if (params.since) {
+    conditions.push('created_at >= ?');
+    values.push(params.since);
+  }
+  if (params.tool) {
+    conditions.push(
+      `(json_extract(request_snapshot, '$.request.tool') = ? OR json_extract(request_snapshot, '$.request.requested_capabilities[0]') = ?)`
+    );
+    values.push(params.tool, params.tool);
+  }
+  if (params.decision) {
+    if (params.decision === 'pending') {
+      conditions.push(`status = 'pending'`);
+    } else {
+      conditions.push(
+        `(json_extract(request_snapshot, '$.decision.decision') = ? OR status = ?)`
+      );
+      values.push(params.decision, params.decision);
+    }
+  }
+  if (params.policy) {
+    conditions.push(`json_extract(request_snapshot, '$.decision.matched_policies[0]') = ?`);
+    values.push(params.policy);
+  }
+
+  const whereClause = conditions.join(' AND ');
+  const rows = db
+    .prepare(
+      `
+      SELECT * FROM decisions
+      WHERE ${whereClause}
+      ORDER BY created_at DESC, decision_id DESC
       LIMIT ? OFFSET ?
     `
     )

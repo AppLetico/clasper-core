@@ -1,0 +1,13 @@
+- policy_id: safe-defaults-restrict-risky-tools
+  subject:
+    type: tool
+  conditions:
+    tool:
+      in:
+        - exec
+        - delete
+  effect:
+    decision: require_approval
+  explanation: "High-risk tool execution requires operator approval."
+  precedence: 20
+  enabled: true

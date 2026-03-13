@@ -1,0 +1,10 @@
+- policy_id: safe-defaults-deny-external-http
+  subject:
+    type: tool
+  conditions:
+    tool_group: web
+  effect:
+    decision: deny
+  explanation: "Deny external HTTP/network tools by default in safe-defaults pack."
+  precedence: 40
+  enabled: true

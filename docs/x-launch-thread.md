@@ -37,11 +37,10 @@ Agent attempts dangerous tool (exec, delete) → Clasper intercepts → require_
 
 ## Tweet 4: Outcome Proof
 
-- Clasper Policy: require_approval
-- Status: waiting_for_operator
-- Timeout: 8s → no approval
-- Result: denied (fail closed)
-- **Tool executed: NO**
+- Posture endpoint: mode + status (`ENFORCED` / `DEGRADED` / `DISABLED`)
+- Synthetic probe: `tool="__clasper_probe__"` evaluated by policy engine
+- Result is derived from live runtime conditions (not static docs)
+- **Machine-verifiable governance posture**
 
 Evidence in Ops UI + Audit log. Reproducible: `npm run prove:governance`
 
@@ -51,7 +50,7 @@ Evidence in Ops UI + Audit log. Reproducible: `npm run prove:governance`
 
 - Repo: https://github.com/AppLetico/clasper-core
 - OpenClaw Governance Quickstart: https://clasper.ai/docs/openclaw-adapter
-- Benchmark command: `npm run prove:governance` (Core running, policies seeded, CLASPER_APPROVAL_MODE=enforce)
+- Verification command: `npm run prove:governance` (Core running, policies seeded, `OPS_LOCAL_API_KEY` + `ADAPTER_JWT_SECRET` set)
 
 ---
 
@@ -64,8 +63,8 @@ make dev
 # 2. In another terminal: seed policies
 npx clasper-core seed openclaw
 
-# 3. Run skeptic-proof benchmark
-CLASPER_APPROVAL_MODE=enforce npm run prove:governance
+# 3. Run skeptic-proof verification
+npm run prove:governance
 
 # 4. Print tool-policy matrix
 npm run openclaw:policies

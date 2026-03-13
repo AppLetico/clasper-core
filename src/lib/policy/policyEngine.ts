@@ -2,6 +2,7 @@ import type { PolicyDecision, PolicyObject } from './policySchema.js';
 import { listPolicies } from './policyStore.js';
 import { hashPolicyBundle } from '../governance/wizardMeta.js';
 import { config } from '../core/config.js';
+import { hasFallbackPolicy } from '../governance/governanceMode.js';
 import {
   evaluateOperator,
   isSafeDottedPath,
@@ -448,13 +449,44 @@ export function evaluatePolicies(ctx: PolicyContext): PolicyEvaluationResult {
   const policyBundleHash = hashPolicyBundle(policies as unknown as Record<string, unknown>[]);
 
   if (matched.length === 0) {
-    return {
-      decision: 'allow',
-      matched_policies: [],
-      decision_trace: decisionTrace,
-      explanation: 'No matching policy',
-      policy_bundle_hash: policyBundleHash,
-    };
+    const mode = config.mode;
+    if (mode === 'permissive') {
+      return {
+        decision: 'allow',
+        matched_policies: [],
+        decision_trace: decisionTrace,
+        explanation: 'No matching policy',
+        policy_bundle_hash: policyBundleHash,
+      };
+    }
+    if (mode === 'strict') {
+      return {
+        decision: 'deny',
+        matched_policies: [],
+        decision_trace: decisionTrace,
+        explanation: 'No matching policy (strict mode)',
+        policy_bundle_hash: policyBundleHash,
+      };
+    }
+    if (mode === 'guarded') {
+      const fallbackPresent = hasFallbackPolicy(policies);
+      if (!fallbackPresent) {
+        return {
+          decision: 'deny',
+          matched_policies: [],
+          decision_trace: decisionTrace,
+          explanation: 'No matching policy; guarded mode requires fallback policy',
+          policy_bundle_hash: policyBundleHash,
+        };
+      }
+      return {
+        decision: 'allow',
+        matched_policies: [],
+        decision_trace: decisionTrace,
+        explanation: 'No matching policy',
+        policy_bundle_hash: policyBundleHash,
+      };
+    }
   }
 
   const sorted = [...matched].sort((a, b) => {

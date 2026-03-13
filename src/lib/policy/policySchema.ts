@@ -134,17 +134,49 @@ export const PolicyEffectSchema = z.object({
   decision: PolicyDecisionSchema,
 });
 
-export const PolicySchema = z.object({
-  policy_id: z.string(),
-  scope: PolicyScopeSchema.optional(),
-  subject: PolicySubjectSchema,
-  conditions: PolicyConditionsSchema.optional(),
-  effect: PolicyEffectSchema,
-  explanation: z.string().optional(),
-  precedence: z.number().int().optional(),
-  enabled: z.boolean().optional(),
-  _wizard_meta: z.record(z.unknown()).optional(),
-  _wizard_meta_hash: z.string().optional(),
-});
+const RESERVED_TOOL_PREFIX = '__clasper_';
+
+function getToolValuesFromPolicy(obj: { subject?: { type?: string; name?: string }; conditions?: Record<string, unknown> }): string[] {
+  const out: string[] = [];
+  if (obj.subject?.type === 'tool' && obj.subject.name) {
+    out.push(obj.subject.name);
+  }
+  const cond = obj.conditions as Record<string, unknown> | undefined;
+  const tool = cond?.tool;
+  if (typeof tool === 'string') out.push(tool);
+  else if (tool && typeof tool === 'object' && !Array.isArray(tool)) {
+    const t = tool as Record<string, unknown>;
+    if (typeof t.prefix === 'string') out.push(t.prefix);
+    if (Array.isArray(t.in)) {
+      for (const v of t.in) {
+        if (typeof v === 'string') out.push(v);
+      }
+    }
+  }
+  return out;
+}
+
+export const PolicySchema = z
+  .object({
+    policy_id: z.string(),
+    scope: PolicyScopeSchema.optional(),
+    subject: PolicySubjectSchema,
+    conditions: PolicyConditionsSchema.optional(),
+    effect: PolicyEffectSchema,
+    explanation: z.string().optional(),
+    precedence: z.number().int().optional(),
+    enabled: z.boolean().optional(),
+    _wizard_meta: z.record(z.unknown()).optional(),
+    _wizard_meta_hash: z.string().optional(),
+  })
+  .refine(
+    (p) => {
+      const tools = getToolValuesFromPolicy(p);
+      return !tools.some((t) => t.startsWith(RESERVED_TOOL_PREFIX));
+    },
+    {
+      message: `Tool names starting with "${RESERVED_TOOL_PREFIX}" are reserved for Clasper internal use (e.g. diagnostics). Choose a different tool name.`,
+    }
+  );
 
 export type PolicyObject = z.infer<typeof PolicySchema>;

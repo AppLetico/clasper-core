@@ -1,0 +1,12 @@
+- policy_id: safe-defaults-require-citation
+  subject:
+    type: adapter
+  conditions:
+    action: model.generate
+    resource:
+      prefix: answer
+  effect:
+    decision: require_approval
+  explanation: "High-impact answer generation requires explicit review unless citation policy is satisfied downstream."
+  precedence: 10
+  enabled: true

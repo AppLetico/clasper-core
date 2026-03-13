@@ -247,8 +247,8 @@ export async function register(api: OpenClawPluginApi): Promise<void> {
   if (!config.clasperUrl) {
     if (isGatewayStart) {
       log(
-        '[clasper] Plugin not activated: clasperUrl is missing. ' +
-          'Set openclaw.json → plugins.entries.clasper-openclaw.config.clasperUrl, then restart the gateway.'
+        '[clasper] DISABLED: clasperUrl is missing. ' +
+          'Governance will not be enforced. Set openclaw.json → plugins.entries.clasper-openclaw.config.clasperUrl, then restart the gateway.'
       );
     }
     return;
@@ -314,9 +314,11 @@ export async function register(api: OpenClawPluginApi): Promise<void> {
     });
     log(`[clasper] Adapter registered with Clasper Core (risk_class=high)`);
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `[clasper] FATAL: Failed to register adapter with Clasper Core at ${clasperUrl}. ` +
-      `Governance cannot be established. Error: ${err instanceof Error ? err.message : String(err)}`
+      `[clasper] FATAL: Adapter registration failed at ${clasperUrl}. ` +
+      `Check: (1) Clasper Core is running, (2) adapterSecret is correct, (3) ADAPTER_JWT_SECRET matches. ` +
+      `Error: ${msg}`
     );
   }
 

@@ -1,0 +1,10 @@
+- policy_id: safe-defaults-require-approval-financial
+  subject:
+    type: adapter
+  conditions:
+    action: payment.charge
+  effect:
+    decision: require_approval
+  explanation: "Financial charge actions require approval."
+  precedence: 30
+  enabled: true

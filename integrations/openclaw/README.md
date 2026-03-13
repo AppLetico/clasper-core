@@ -233,6 +233,11 @@ CLASPER_POLICY_OPERATORS=true
 # Back-compat (older config, still supported):
 #   CLASPER_REQUIRE_APPROVAL_IN_CORE=allow  → simulate
 #   CLASPER_REQUIRE_APPROVAL_IN_CORE=block  → enforce
+#
+# Governance mode (no-match behavior):
+#   CLASPER_MODE=permissive (default) -> no-match allow
+#   CLASPER_MODE=guarded              -> no-match requires fallback policy
+#   CLASPER_MODE=strict               -> no-match deny
 
 # ── Network & tenant ───────────────────────────────────────────────
 # These defaults are fine for local single-tenant development.
@@ -251,11 +256,12 @@ CLASPER_LOCAL_WORKSPACE_ID=local
 | `ADAPTER_JWT_SECRET` | `adapterSecret` | Yes — same string on both sides |
 | `CLASPER_PORT` | `clasperUrl` (port portion) | Yes — plugin must reach this port |
 | `OPS_LOCAL_API_KEY` | *(not used by plugin)* | No — only used for the Ops API / seed scripts |
-| `CLASPER_REQUIRE_APPROVAL_IN_CORE` | *(not used by plugin)* | No — controls Clasper-side behavior only |
+| `CLASPER_APPROVAL_MODE` | *(not used by plugin)* | No — controls Clasper-side approval behavior only |
+| `CLASPER_MODE` | *(not used by plugin)* | No — controls Clasper-side no-match governance behavior |
 
-> **Important:** If you leave `CLASPER_REQUIRE_APPROVAL_IN_CORE=allow` (the default),
-> any `require_approval` decision will be auto-allowed and audited. Set it to `block`
-> to see the full approval polling flow in the Ops Console.
+> **Important:** If you use `CLASPER_APPROVAL_MODE=simulate` (default),
+> `require_approval` decisions are auto-allowed and audited as override behavior.
+> Set `CLASPER_APPROVAL_MODE=enforce` to see full approval polling in the Ops Console.
 
 ### Manual Step 2: Start Clasper Core
 
@@ -281,10 +287,11 @@ by the plugin — you must seed them explicitly:
 npx clasper-core seed openclaw
 ```
 
-> **Important:** Clasper Core’s policy engine defaults to **allow** when no policy
-> matches. This OpenClaw policy pack includes a **fallback rule** (`openclaw-fallback-require-approval`)
-> so *new / unscoped tools do not silently execute*. If you remove or disable the
-> fallback rule, an unrecognized tool may be allowed unless risk/budget/RBAC gates block it.
+> **Important:** No-match behavior depends on `CLASPER_MODE`. In default `permissive`
+> mode, no-match allows. This OpenClaw policy pack includes a **fallback rule**
+> (`openclaw-fallback-require-approval`) so *new / unscoped tools do not silently execute*.
+> In `guarded` mode, missing fallback blocks no-match requests. In `strict` mode, no-match
+> denies regardless of fallback.
 
 This reads `integrations/openclaw/policies/openclaw-default.yaml` and POSTs each
 policy to the Ops API. You should see output like:
@@ -444,9 +451,9 @@ npx tsx integrations/openclaw/demos/malicious-skill.ts
 | Remote code exec | `exec` | **REQUIRES APPROVAL** | Approvals view: pending decision |
 | Read file | `read` | **ALLOWED** | Traces: successful execution |
 
-> If `CLASPER_REQUIRE_APPROVAL_IN_CORE=allow`, the require_approval scenarios will
-> show as auto-allowed with an audit note. Set it to `block` to see them actually
-> pause and wait for approval.
+> If `CLASPER_APPROVAL_MODE=simulate`, `require_approval` scenarios are auto-allowed
+> with an audit note. Set `CLASPER_APPROVAL_MODE=enforce` to see them pause and wait
+> for approval.
 
 ---
 
@@ -476,7 +483,7 @@ Open [http://localhost:8081/](http://localhost:8081/) and check:
 - **Adapters** — `openclaw-local` should appear with `risk_class: high`
 - **Policies** — All OpenClaw policies listed and enabled
 - **Audit** — Events for blocked, approved, and executed tool invocations
-- **Approvals** — Pending decisions (when `CLASPER_REQUIRE_APPROVAL_IN_CORE=block`)
+- **Approvals** — Pending decisions (when `CLASPER_APPROVAL_MODE=enforce`)
 - **Tools** — Tool names with allow/block rates derived from actual decisions
 
 ---
@@ -577,7 +584,7 @@ Ops Console
 | Plugin won't start: `Failed to register adapter` | Clasper Core not running or wrong URL | Start Clasper Core first; check `clasperUrl` in plugin config |
 | All tools blocked: `Clasper Core unreachable` | Network issue or Core crashed | This is fail-closed by design; restart Core |
 | Seed fails with 401 | `OPS_LOCAL_API_KEY` mismatch | Match the key in `.env` or leave it blank to disable Ops auth |
-| `require_approval` scenarios auto-allow | `CLASPER_REQUIRE_APPROVAL_IN_CORE=allow` | Set to `block` in `.env` and restart Core |
+| `require_approval` scenarios auto-allow | `CLASPER_APPROVAL_MODE=simulate` | Set to `enforce` in `.env` and restart Core |
 | Approval times out while pending | Nobody approved in time | Increase `approvalWaitTimeoutMs` in plugin config, then restart gateway |
 | Retry creates another pending approval | New execution was generated for a different request fingerprint | Retry the exact same tool/target, or widen `executionReuseWindowMs` for slower operator workflows |
 

@@ -1,6 +1,9 @@
 import dotenv from "dotenv";
+import type { GovernanceMode } from "../governance/governanceMode.js";
 
 dotenv.config();
+
+const VALID_MODES: GovernanceMode[] = ['permissive', 'guarded', 'strict'];
 
 /**
  * LLM Provider configuration type.
@@ -96,6 +99,18 @@ export const config = {
 
   // Enable policy condition operators (in, prefix, all_under, etc).
   policyOperatorsEnabled: process.env.CLASPER_POLICY_OPERATORS === "true",
+
+  // Governance mode: permissive | guarded | strict
+  // - permissive (default): no-match => allow
+  // - guarded: no-match requires fallback policy; if missing => block
+  // - strict: no-match => deny
+  mode: (VALID_MODES.includes(process.env.CLASPER_MODE as GovernanceMode)
+    ? process.env.CLASPER_MODE
+    : 'permissive') as GovernanceMode,
+
+  // Decision retention safeguard (OSS): keep newest N decisions.
+  // Set <= 0 to disable cap.
+  decisionMaxRows: parseInt(process.env.CLASPER_DECISION_MAX_ROWS || "100000", 10),
 
   // Approval behavior in Core (OSS).
   //

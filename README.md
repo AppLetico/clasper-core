@@ -23,27 +23,19 @@ Policy enforcement for OpenClaw tool execution.
 
 ## Prove it in 30 seconds
 
-Run the governance benchmark:
+Run governance verification:
 
 ```bash
 npm install
 npm run prove:governance
 ```
 
-Expected output:
+With Clasper running and `OPS_LOCAL_API_KEY` set, the script seeds OpenClaw policies, calls the posture endpoint, and runs a synthetic decision probe. Output includes:
 
-```
-AI requested tool: exec
+- **Posture**: mode, status (ENFORCED/DEGRADED/DISABLED), fallback presence, policy count
+- **Probe**: deterministic `__clasper_probe__` tool decision from the policy engine
 
-Clasper Policy: require_approval
-Status:          waiting_for_operator
-Timeout:         8s
-
-Result: denied (fail closed)
-Tool executed: NO
-```
-
-<em>Start Clasper (<code>npm run dev</code>) in another terminal, then run <code>prove:governance</code> again to seed policies and see the Ops Console at http://localhost:8081/ops</em>
+<em>Start Clasper (<code>npm run dev</code>) in another terminal, then run <code>prove:governance</code> again. Set <code>OPS_LOCAL_API_KEY</code> and <code>ADAPTER_JWT_SECRET</code> for full verification. Open the Ops Console at http://localhost:8081/ops</em>
 
 ---
 
@@ -60,6 +52,25 @@ Tool Execution
 ```
 
 Clasper is a **policy enforcement layer** — it does not run agents or tools; it decides whether execution is allowed. Stateless and deterministic.
+
+## 10-second Mental Model
+
+```
+AI Action
+   ↓
+Clasper Policy Evaluation
+   ↓
+Decision Logged
+   ↓
+Inspect via CLI or API
+```
+
+Quick debugging flow:
+
+```bash
+clasper-core decisions latest --ops-api-key <key>
+clasper-core decisions show <decision_id> --ops-api-key <key>
+```
 
 ---
 
@@ -90,10 +101,13 @@ Tool Policy Matrix (from `make seed-openclaw-policies`):
 
 ## Security Guarantees
 
-- Unknown tools require approval
-- Misconfigured plugins fail startup
-- Missing fallback policy blocks execution
+- Unknown tools require approval (fallback policy)
+- Misconfigured plugins: missing `clasperUrl` disables; registration/auth failures halt startup
+- Guarded mode: missing fallback policy blocks no-match requests
+- Strict mode: no-match denies
 - Approval service outages trigger fail-closed behavior
+
+Set `CLASPER_MODE=permissive|guarded|strict` to control no-match behavior (default: permissive).
 
 ---
 
@@ -122,6 +136,7 @@ In a second terminal:
 
 ```bash
 npx clasper-core seed openclaw
+npx clasper-core policy install safe-defaults
 npm run seed:ops
 ```
 
@@ -192,7 +207,7 @@ Execution
 
 This allows operators to:
 
-* replay agent runs
+* decision replay (context + policy re-evaluation)
 * simulate new policies
 * investigate incidents
 
@@ -229,7 +244,7 @@ Each trace includes the **full execution graph**.
 
 ## Policy Simulation
 
-Replay historical traces against new policies.
+Decision replay: re-evaluate historical trace context against new policies (no re-execution).
 
 Useful for:
 
@@ -299,7 +314,7 @@ Prompt → Reasoning → Tool → Policy → Approval → Execution
 
 Traces can be:
 
-* replayed
+* decision replayed (context for policy simulation)
 * diffed
 * simulated
 

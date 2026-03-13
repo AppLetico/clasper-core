@@ -5,6 +5,7 @@ import path from 'node:path';
 import { initDatabase, resetDatabase } from '../core/db.js';
 import { evaluatePolicy } from './policyEngine.js';
 import { upsertPolicy } from '../policy/policyStore.js';
+import { PolicySchema } from '../policy/policySchema.js';
 import { config } from '../core/config.js';
 
 const originalPolicyOperatorsEnabled = config.policyOperatorsEnabled;
@@ -435,6 +436,24 @@ describe('Policy engine', () => {
     });
 
     expect(result.matched_policies).not.toContain('unsafe_dotted_key');
+  });
+
+  it('rejects policy targeting __clasper_ tool prefix', () => {
+    expect(() =>
+      PolicySchema.parse({
+        policy_id: 'probe-policy',
+        subject: { type: 'tool', name: '__clasper_probe__' },
+        effect: { decision: 'allow' },
+      })
+    ).toThrow(/__clasper_/);
+    expect(() =>
+      PolicySchema.parse({
+        policy_id: 'probe-cond',
+        subject: { type: 'tool' },
+        conditions: { tool: '__clasper_probe__' },
+        effect: { decision: 'deny' },
+      })
+    ).toThrow(/__clasper_/);
   });
 
   it('preserves legacy matching when operators are disabled', () => {

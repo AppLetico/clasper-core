@@ -89,12 +89,13 @@ import { getBudgetManager } from "../lib/governance/budgetManager.js";
 import { calculateRiskScore, type RiskScoringInput } from "../lib/governance/riskScoring.js";
 import { evaluateExecutionDecision } from "../lib/governance/executionDecision.js";
 import { evaluatePolicy } from "../lib/governance/policyEngine.js";
-import { createDecision, getDecision, getLatestDecisionForExecution, listDecisions, listPendingDecisions, recordDecision, resolveDecision } from "../lib/governance/decisions.js";
+import { computePosture } from "../lib/governance/governancePosture.js";
+import { createDecision, getDecision, getLatestDecisionForExecution, listAdapterDecisions, listDecisions, listPendingDecisions, recordDecision, resolveDecision } from "../lib/governance/decisions.js";
 import { createExportBundle } from "../lib/exports/exportBundle.js";
 import { PolicySchema } from "../lib/policy/policySchema.js";
 import { deletePolicy, getPolicy, listPolicies, setPolicyEnabled, upsertPolicy } from "../lib/policy/policyStore.js";
 import { ingestAudit, ingestCost, ingestMetrics, ingestTrace, ingestViolation, recordBlockedExecutionTrace } from "../lib/adapters/ingest.js";
-import { requireAdapterContextFromHeaders, AdapterAuthError, type AdapterAuthContext } from "../lib/adapters/auth.js";
+import { requireAdapterContextFromHeaders, AdapterAuthError, buildAdapterToken, type AdapterAuthContext } from "../lib/adapters/auth.js";
 import { getAdapterRegistry } from "../lib/adapters/registry.js";
 import { AdapterRegistrationSchema } from "../lib/adapters/types.js";
 import { runBuiltinRuntime } from "../lib/adapters/builtinRuntime.js";
@@ -274,6 +275,126 @@ function buildPolicyContextFromDecisionRecord(
         publisher: typeof p.publisher === "string" ? p.publisher : undefined,
       };
     })(),
+  };
+}
+
+function parseSinceToIso(input?: string): string | undefined {
+  if (!input) return undefined;
+  const trimmed = input.trim();
+  if (!trimmed) return undefined;
+  const durationMatch = trimmed.match(/^(\d+)([smhd])$/i);
+  if (durationMatch) {
+    const amount = Number(durationMatch[1]);
+    const unit = durationMatch[2].toLowerCase();
+    const unitMs =
+      unit === "s" ? 1000 : unit === "m" ? 60 * 1000 : unit === "h" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+    return new Date(Date.now() - amount * unitMs).toISOString();
+  }
+  const parsed = Date.parse(trimmed);
+  if (Number.isNaN(parsed)) {
+    throw new Error("Invalid since value. Use duration (e.g. 10m, 1h) or ISO timestamp.");
+  }
+  return new Date(parsed).toISOString();
+}
+
+function summarizeDecisionEffect(record: ReturnType<typeof getDecision>): "allow" | "deny" | "require_approval" | "pending" {
+  if (!record) return "deny";
+  const snapshot = asObject(record.request_snapshot);
+  const decisionObj = asObject(snapshot?.decision);
+  const explicitDecision = decisionObj?.decision;
+  if (
+    explicitDecision === "allow" ||
+    explicitDecision === "deny" ||
+    explicitDecision === "require_approval" ||
+    explicitDecision === "pending"
+  ) {
+    return explicitDecision;
+  }
+  if (record.status === "pending") return "pending";
+  if (record.status === "approved" || record.status === "allow") return "allow";
+  if (record.status === "denied" || record.status === "deny") return "deny";
+  return "deny";
+}
+
+function summarizeAdapterDecisionRow(
+  record: ReturnType<typeof getDecision>,
+  governanceStatus: string
+): {
+  decision_id: string;
+  timestamp: string;
+  tool: string | null;
+  policy: string | null;
+  decision: "allow" | "deny" | "require_approval" | "pending";
+  status: string;
+  trace_id: string | null;
+  state: string;
+  execution_id: string;
+} {
+  const snapshot = asObject(record?.request_snapshot);
+  const requestData = asObject(snapshot?.request);
+  const decisionData = asObject(snapshot?.decision);
+  const requestedCaps = asStringArray(requestData?.requested_capabilities) || [];
+  const matchedPolicies = asStringArray(decisionData?.matched_policies) || [];
+  const traceIdFromSnapshot = typeof snapshot?.trace_id === "string" ? snapshot.trace_id : null;
+  const traceIdFromRequest = typeof requestData?.trace_id === "string" ? (requestData.trace_id as string) : null;
+  const traceIdCandidate: string | null = traceIdFromSnapshot ?? traceIdFromRequest;
+  return {
+    decision_id: record?.decision_id || "",
+    timestamp: record?.created_at || new Date(0).toISOString(),
+    tool: typeof requestData?.tool === "string" ? (requestData.tool as string) : requestedCaps[0] || null,
+    policy: matchedPolicies[0] || null,
+    decision: summarizeDecisionEffect(record),
+    status: governanceStatus,
+    trace_id: traceIdCandidate,
+    state: record?.status || "deny",
+    execution_id: record?.execution_id || "",
+  };
+}
+
+function buildDecisionExplain(record: ReturnType<typeof getDecision>): {
+  policy: string | null;
+  reason: string;
+  tool: string | null;
+  input_summary: Record<string, unknown>;
+  decision: "allow" | "deny" | "require_approval" | "pending";
+} {
+  const snapshot = asObject(record?.request_snapshot);
+  const requestData = asObject(snapshot?.request);
+  const decisionData = asObject(snapshot?.decision);
+  const matchedPolicies = asStringArray(decisionData?.matched_policies) || [];
+  const decisionTrace = decisionData?.decision_trace;
+  const traceEntries = Array.isArray(decisionTrace) ? decisionTrace : [];
+  const matchedEntry = traceEntries.find((entry) => asObject(entry)?.result === "matched");
+  const matchedEntryObj = asObject(matchedEntry);
+  const reason =
+    (typeof decisionData?.explanation === "string" && decisionData.explanation) ||
+    (typeof matchedEntryObj?.explanation === "string" && (matchedEntryObj.explanation as string)) ||
+    (typeof (record?.resolution as Record<string, unknown> | null)?.note === "string"
+      ? ((record?.resolution as Record<string, unknown>).note as string)
+      : "") ||
+    "No explanation available.";
+
+  const requestContext = asObject(requestData?.context);
+  const execCtx = asObject(requestContext?.exec);
+  const targets = requestContext?.targets;
+  const targetsObj = asObject(targets);
+  const inputSummary: Record<string, unknown> = {};
+  if (typeof execCtx?.argv0 === "string") inputSummary.argv0 = execCtx.argv0;
+  if (Array.isArray(execCtx?.argv)) inputSummary.argv = (execCtx.argv as unknown[]).slice(0, 8);
+  if (typeof execCtx?.cwd === "string") inputSummary.cwd = execCtx.cwd;
+  if (Array.isArray(targets)) inputSummary.targets = (targets as unknown[]).slice(0, 8);
+  if (Array.isArray(targetsObj?.paths)) inputSummary.paths = (targetsObj.paths as unknown[]).slice(0, 8);
+  if (Array.isArray(targetsObj?.hosts)) inputSummary.hosts = (targetsObj.hosts as unknown[]).slice(0, 8);
+  if (typeof requestData?.resource === "string") inputSummary.resource = requestData.resource;
+  if (typeof requestData?.intent === "string") inputSummary.intent = requestData.intent;
+
+  const requestedCaps = asStringArray(requestData?.requested_capabilities) || [];
+  return {
+    policy: matchedPolicies[0] || null,
+    reason,
+    tool: typeof requestData?.tool === "string" ? (requestData.tool as string) : requestedCaps[0] || null,
+    input_summary: inputSummary,
+    decision: summarizeDecisionEffect(record),
   };
 }
 
@@ -813,8 +934,8 @@ export function buildApp() {
   });
 
   /**
-   * Replay a trace — returns replay context for policy simulation and debugging.
-   * Full replay (re-execution) is planned; for now returns original trace + context.
+   * Decision replay — returns trace context for policy simulation and debugging.
+   * Does not re-execute; returns original trace + replay config for policy re-evaluation.
    */
   app.post("/ops/api/traces/:id/replay", async (request, reply) => {
     try {
@@ -1850,6 +1971,191 @@ export function buildApp() {
     }
   });
 
+  app.get("/api/adapter/posture", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const posture = computePosture({
+        tenant_id: adapterContext.tenantId,
+        workspace_id: adapterContext.workspaceId,
+        adapter_id: adapterContext.adapterId,
+      });
+      return reply.send(posture);
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      throw error;
+    }
+  });
+  app.get("/api/adapter/policy-posture", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const posture = computePosture({
+        tenant_id: adapterContext.tenantId,
+        workspace_id: adapterContext.workspaceId,
+        adapter_id: adapterContext.adapterId,
+      });
+      return reply.send(posture);
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      throw error;
+    }
+  });
+
+  app.get("/api/adapter/policies", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const QuerySchema = z.object({
+        limit: z.coerce.number().int().min(1).max(500).optional(),
+        offset: z.coerce.number().int().min(0).optional(),
+      });
+      const parsed = QuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+      const limit = parsed.data.limit ?? 50;
+      const offset = parsed.data.offset ?? 0;
+      const effective = listPolicies({
+        tenantId: adapterContext.tenantId,
+        workspaceId: adapterContext.workspaceId,
+        enabled: true,
+      }).sort((a, b) => {
+        const pa = a.precedence ?? 0;
+        const pb = b.precedence ?? 0;
+        if (pa !== pb) return pb - pa;
+        return String(a.policy_id).localeCompare(String(b.policy_id));
+      });
+      const paged = effective.slice(offset, offset + limit).map((p) => ({
+        policy_id: p.policy_id,
+        decision: p.effect.decision,
+        precedence: p.precedence ?? 0,
+        enabled: p.enabled ?? true,
+        subject_type: p.subject.type,
+        tool: p.subject.type === "tool" ? p.subject.name || "*" : null,
+        updated_at: p.updated_at,
+      }));
+      return reply.send({ policies: paged, total: effective.length, limit, offset });
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Policy summary lookup failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.get("/api/adapter/decisions", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const QuerySchema = z.object({
+        status: z.enum(["pending", "approved", "denied", "expired", "allow", "deny"]).optional(),
+        decision: z.enum(["allow", "deny", "require_approval", "pending"]).optional(),
+        tool: z.string().optional(),
+        policy: z.string().optional(),
+        since: z.string().optional(),
+        limit: z.coerce.number().int().min(1).max(500).optional(),
+        offset: z.coerce.number().int().min(0).optional(),
+      });
+      const parsed = QuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+      const limit = parsed.data.limit ?? 50;
+      const offset = parsed.data.offset ?? 0;
+      const sinceIso = parseSinceToIso(parsed.data.since);
+      const posture = computePosture({
+        tenant_id: adapterContext.tenantId,
+        workspace_id: adapterContext.workspaceId,
+        adapter_id: adapterContext.adapterId,
+      });
+      const governanceStatus = posture.status.toLowerCase();
+      const records = listAdapterDecisions({
+        tenantId: adapterContext.tenantId,
+        workspaceId: adapterContext.workspaceId,
+        adapterId: adapterContext.adapterId,
+        status: parsed.data.status,
+        decision: parsed.data.decision,
+        tool: parsed.data.tool,
+        policy: parsed.data.policy,
+        since: sinceIso,
+        limit,
+        offset,
+      });
+      const decisions = records.map((row) => summarizeAdapterDecisionRow(row, governanceStatus));
+      return reply.send({ decisions, limit, offset });
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message =
+        error instanceof Error ? error.message : "Adapter decision list failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.get("/api/adapter/decisions/:decisionId", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const decision = getDecision((request.params as { decisionId: string }).decisionId);
+      if (!decision) {
+        return reply.status(404).send({ error: "Decision not found" });
+      }
+      if (
+        decision.tenant_id !== adapterContext.tenantId ||
+        decision.workspace_id !== adapterContext.workspaceId ||
+        decision.adapter_id !== adapterContext.adapterId
+      ) {
+        return reply.status(403).send({ error: "Decision scope mismatch" });
+      }
+      const posture = computePosture({
+        tenant_id: adapterContext.tenantId,
+        workspace_id: adapterContext.workspaceId,
+        adapter_id: adapterContext.adapterId,
+      });
+      return reply.send({
+        decision: summarizeAdapterDecisionRow(decision, posture.status.toLowerCase()),
+      });
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Decision lookup failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.get("/api/adapter/decisions/:decisionId/explain", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const decision = getDecision((request.params as { decisionId: string }).decisionId);
+      if (!decision) {
+        return reply.status(404).send({ error: "Decision not found" });
+      }
+      if (
+        decision.tenant_id !== adapterContext.tenantId ||
+        decision.workspace_id !== adapterContext.workspaceId ||
+        decision.adapter_id !== adapterContext.adapterId
+      ) {
+        return reply.status(403).send({ error: "Decision scope mismatch" });
+      }
+      return reply.send(buildDecisionExplain(decision));
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Decision explain failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
   /**
    * Pre-execution decision endpoint for adapters.
    */
@@ -1885,9 +2191,12 @@ export function buildApp() {
         return reply.status(403).send({ error: "Adapter scope mismatch" });
       }
 
-      const unauthorized = parsed.data.requested_capabilities.filter(
-        (cap) => !adapterContext.allowedCapabilities.includes(cap)
-      );
+      const isProbe = parsed.data.tool === "__clasper_probe__";
+      const unauthorized = isProbe
+        ? []
+        : parsed.data.requested_capabilities.filter(
+            (cap) => !adapterContext.allowedCapabilities.includes(cap)
+          );
       if (unauthorized.length > 0) {
         try {
           recordBlockedExecutionTrace(
@@ -2355,6 +2664,33 @@ export function buildApp() {
       }
       const message = error instanceof Error ? error.message : "Policy dry-run failed";
       return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Adapter probe token for governance verification (prove:governance).
+   * Returns a short-lived JWT with __clasper_probe__ capability for synthetic decision probe.
+   * Requires Ops auth.
+   */
+  app.get("/ops/api/adapter-probe-token", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const tenantId = config.localTenantId;
+      const workspaceId = config.localWorkspaceId;
+      const adapterId = "openclaw-local";
+      const token = await buildAdapterToken({
+        adapter_id: adapterId,
+        tenant_id: tenantId,
+        workspace_id: workspaceId,
+        allowed_capabilities: ["__clasper_probe__"],
+      }, "5m");
+      return reply.send({ token });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      throw error;
     }
   });
 
@@ -3572,7 +3908,7 @@ export function buildApp() {
 
   /**
    * Replay a trace with different configuration.
-   * Returns comparison between original and replayed execution.
+   * Returns decision replay context (original trace + config for policy re-evaluation).
    */
   const ReplaySchema = z.object({
     model: z.string().optional(),
