@@ -1,7 +1,7 @@
 # Clasper Core
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/AppLetico/clasper-core/main/clasper-banner.png" alt="Clasper" width="100%" />
+  <img src="https://raw.githubusercontent.com/AppLetico/clasper-core/main/clasper-banner.png?v=2" alt="Clasper" width="100%" />
 </p>
 
 <h2 align="center">Control What Your AI Can Actually Do</h2>
