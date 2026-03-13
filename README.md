@@ -1,22 +1,15 @@
-# Clasper Core
+# Clasper
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/AppLetico/clasper-core/main/clasper-banner.jpg" alt="Clasper" width="100%" />
 </p>
 
-<h2 align="center">Control What Your AI Can Actually Do</h2>
-
 <p align="center">
-<em>The governance layer for AI agents.</em>
+<strong>Control what AI tools are allowed to run.</strong>
 </p>
 
 <p align="center">
-<b>Governance infrastructure for AI execution.</b><br/>
-Before an AI calls an API, executes code, or touches your data — Clasper decides if it's allowed.
-</p>
-
-<p align="center">
-Policy enforcement • execution tracing • approvals • agent identity
+Policy enforcement for OpenClaw tool execution.
 </p>
 
 <p align="center">
@@ -28,94 +21,113 @@ Policy enforcement • execution tracing • approvals • agent identity
 
 ---
 
-# Why Clasper Exists
+## Prove it in 30 seconds
 
-AI systems are rapidly shifting from **chat interfaces** to **autonomous actors**.
+Run the governance benchmark:
 
-Agents now:
+```bash
+npm install
+npm run prove:governance
+```
 
-- call APIs  
-- run tools  
-- modify data  
-- access internal services  
-- trigger workflows  
+Expected output:
 
-Prompt guardrails and framework-level controls are **not enough** once execution begins.
+```
+AI requested tool: exec
 
-Every AI system eventually needs a deterministic answer to one question:
+Clasper Policy: require_approval
+Status:          waiting_for_operator
+Timeout:         8s
 
-> **Should this AI action be allowed to run?**
+Result: denied (fail closed)
+Tool executed: NO
+```
 
-Clasper provides that answer.
+<em>Start Clasper (<code>npm run dev</code>) in another terminal, then run <code>prove:governance</code> again to seed policies and see the Ops Console at http://localhost:8081/ops</em>
 
 ---
 
-# What Clasper Is
-
-Clasper is a **governance engine for AI execution**.
-
-It sits between **AI agents and the systems they control**.
-
-Every action must request permission before execution.
+## Architecture
 
 ```
-Agent
-│
-│ capability request
-▼
-Clasper Core
-│
-│ policy decision
-▼
-Execution Adapter
+AI Agent
+   ↓
+OpenClaw Runtime
+   ↓
+Clasper Policy Engine
+   ↓
+Tool Execution
 ```
 
-Clasper determines whether a request is:
-
-- allowed
-- denied
-- requires approval
-- pending
-
-Every decision produces a **traceable governance record**.
+Clasper is a **policy enforcement layer** — it does not run agents or tools; it decides whether execution is allowed. Stateless and deterministic.
 
 ---
 
-# Quick Start (2 Minutes)
+## Why Clasper
 
-Clone and run Clasper locally.
+AI agents can execute tools that trigger real-world side effects.
+
+Deleting data  
+Sending payments  
+Running shell commands  
+
+Clasper intercepts tool execution and enforces policy before those actions run.
+
+---
+
+## Policy Example
+
+Tool Policy Matrix (from `make seed-openclaw-policies`):
+
+| Tool | Policy |
+|------|--------|
+| `exec` | require_approval |
+| `write` | require_approval |
+| `read`, `sessions_list`, `memory_search` | allow |
+| `unknown_tool` | require_approval (fallback) |
+
+---
+
+## Security Guarantees
+
+- Unknown tools require approval
+- Misconfigured plugins fail startup
+- Missing fallback policy blocks execution
+- Approval service outages trigger fail-closed behavior
+
+---
+
+## OSS vs Cloud
+
+| Capability | OSS | Cloud |
+|------------|-----|-------|
+| Policy enforcement | ✅ | ✅ |
+| Local approvals | ✅ | ✅ |
+| Signed evidence | ❌ | ✅ |
+| Tokenized approvals | ❌ | ✅ |
+
+---
+
+# Quickstart
 
 ```bash
 git clone https://github.com/clasper-ai/clasper-core
 cd clasper-core
 npm install
+export ADAPTER_JWT_SECRET="dev-only-secret"
 npm run dev
 ```
 
-Set required environment variables:
+In a second terminal:
 
 ```bash
-export ADAPTER_JWT_SECRET="dev-only-secret"
-```
-
-With the server running, open a **second terminal** and seed the Ops Console with real execution traces:
-
-```bash
+npx clasper-core seed openclaw
 npm run seed:ops
 ```
 
-Open the Ops Console:
+Open **http://localhost:8081/ops** — see traces, policy decisions, and the Ops Console.
 
-```
-http://localhost:8081/ops
-```
-
-You will immediately see:
-
-* agent execution traces
-* policy decisions
-* governance health metrics
-* adapter activity
+To connect OpenClaw, see **[How to set up OpenClaw with Clasper](https://clasper.ai/docs/openclaw-adapter/)**.
 
 ---
 
@@ -322,36 +334,6 @@ Each adapter registers capabilities and certification tier.
 
 ---
 
-# Architecture
-
-```
-             ┌─────────────┐
-             │   AI Agent  │
-             └──────┬──────┘
-                    │
-                    │ capability request
-                    ▼
-             ┌─────────────┐
-             │  Clasper    │
-             │    Core     │
-             │             │
-             │ Policy Eval │
-             │ Risk Check  │
-             │ Trace Log   │
-             └──────┬──────┘
-                    │
-                    │ decision
-                    ▼
-             ┌─────────────┐
-             │  Execution  │
-             │   Adapter   │
-             └─────────────┘
-```
-
-Clasper remains **stateless and deterministic**, while execution happens through adapters.
-
----
-
 # Deployment Modes
 
 ## Governance Only
@@ -402,6 +384,12 @@ Run CI locally:
 ```
 npm run ci
 ```
+
+---
+
+# Example & Integration
+
+The first-class [OpenClaw](https://openclaw.ai) adapter intercepts tool calls and sends them to Clasper for policy evaluation. Setup: **[OpenClaw Adapter docs](https://clasper.ai/docs/openclaw-adapter/)**.
 
 ---
 
