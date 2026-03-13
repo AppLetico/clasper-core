@@ -21,7 +21,7 @@ Policy enforcement • execution tracing • approvals • agent identity
 
 <p align="center">
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-<img src="https://img.shields.io/github/package-json/v/AppLetico/clasper-core" alt="Version">
+<img src="https://img.shields.io/github/v/release/AppLetico/clasper-core" alt="Version">
 <img src="https://img.shields.io/badge/built_with-TypeScript-blue" alt="TypeScript">
 <img src="https://img.shields.io/badge/status-Beta-yellow" alt="Status">
 </p>
