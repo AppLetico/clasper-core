@@ -1,0 +1,451 @@
+# OpenClaw Default Policy Pack for Clasper
+#
+# These policies govern OpenClaw tool invocations. They are loaded into
+# Clasper Core via `make seed-openclaw-policies` and should NOT be
+# auto-seeded from the plugin.
+#
+# Policy semantics:
+#   - Policies match on deterministic fields (tool, tool_group, capability)
+#   - Intent is assistive only — never required for matching
+#   - Higher precedence wins; deny > require_approval > allow at same level
+#
+# Tools are governed per-invocation, not pre-authorized.
+
+# --- Low-risk: allow read-only operations ---
+- policy_id: openclaw-allow-read-file
+  subject:
+    type: tool
+    name: read
+  conditions:
+    tool: read
+    tool_group: fs
+  effect:
+    decision: allow
+  explanation: "Low-risk read operations are allowed by default."
+  precedence: 10
+  enabled: true
+
+# Sessions: read-only (list, history, status)
+- policy_id: openclaw-allow-sessions-list
+  subject:
+    type: tool
+    name: sessions_list
+  conditions:
+    tool: sessions_list
+    tool_group: sessions
+  effect:
+    decision: allow
+  explanation: "Read-only session list is allowed."
+  precedence: 10
+  enabled: true
+
+- policy_id: openclaw-allow-sessions-history
+  subject:
+    type: tool
+    name: sessions_history
+  conditions:
+    tool: sessions_history
+    tool_group: sessions
+  effect:
+    decision: allow
+  explanation: "Read-only session history is allowed."
+  precedence: 10
+  enabled: true
+
+- policy_id: openclaw-allow-session-status
+  subject:
+    type: tool
+    name: session_status
+  conditions:
+    tool: session_status
+    tool_group: sessions
+  effect:
+    decision: allow
+  explanation: "Read-only session status is allowed."
+  precedence: 10
+  enabled: true
+
+# Memory: read-only (search, get)
+- policy_id: openclaw-allow-memory-search
+  subject:
+    type: tool
+    name: memory_search
+  conditions:
+    tool: memory_search
+    tool_group: memory
+  effect:
+    decision: allow
+  explanation: "Read-only memory search is allowed."
+  precedence: 10
+  enabled: true
+
+- policy_id: openclaw-allow-memory-get
+  subject:
+    type: tool
+    name: memory_get
+  conditions:
+    tool: memory_get
+    tool_group: memory
+  effect:
+    decision: allow
+  explanation: "Read-only memory get is allowed."
+  precedence: 10
+  enabled: true
+
+# Process: agent's own background exec sessions (list, poll, log, write, kill)
+- policy_id: openclaw-allow-process
+  subject:
+    type: tool
+    name: process
+  conditions:
+    tool: process
+    tool_group: runtime
+  effect:
+    decision: allow
+  explanation: "Process manages agent's own background exec sessions; allow."
+  precedence: 10
+  enabled: true
+
+# Agents list: read-only
+- policy_id: openclaw-allow-agents-list
+  subject:
+    type: tool
+    name: agents_list
+  conditions:
+    tool: agents_list
+  effect:
+    decision: allow
+  explanation: "Listing available agents is read-only and allowed."
+  precedence: 10
+  enabled: true
+
+# Image / PDF: read-only analysis
+- policy_id: openclaw-allow-image
+  subject:
+    type: tool
+    name: image
+  conditions:
+    tool: image
+  effect:
+    decision: allow
+  explanation: "Image analysis is read-only."
+  precedence: 10
+  enabled: true
+
+- policy_id: openclaw-allow-pdf
+  subject:
+    type: tool
+    name: pdf
+  conditions:
+    tool: pdf
+  effect:
+    decision: allow
+  explanation: "PDF analysis is read-only."
+  precedence: 10
+  enabled: true
+
+# Canvas: low-risk UI (present, eval, snapshot)
+- policy_id: openclaw-allow-canvas
+  subject:
+    type: tool
+    name: canvas
+  conditions:
+    tool: canvas
+    tool_group: ui
+  effect:
+    decision: allow
+  explanation: "Canvas present/eval/snapshot are low-risk display operations."
+  precedence: 10
+  enabled: true
+
+# --- Side effects: require approval ---
+- policy_id: openclaw-allow-safe-shell-reads
+  subject:
+    type: tool
+  conditions:
+    tool: exec
+    tool_group: runtime
+    context.exec.argv0:
+      in: ["ls", "pwd", "whoami"]
+    context.targets.paths:
+      all_under:
+        - "{{workspace.root}}"
+  effect:
+    decision: allow
+  explanation: "Safe read-only shell commands within workspace."
+  precedence: 30
+  enabled: true
+
+- policy_id: openclaw-require-approval-exec
+  subject:
+    type: tool
+    name: exec
+  conditions:
+    tool: exec
+    tool_group: runtime
+  effect:
+    decision: require_approval
+  explanation: "Shell execution requires operator approval before proceeding."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-write-file
+  subject:
+    type: tool
+    name: write
+  conditions:
+    tool: write
+    tool_group: fs
+  effect:
+    decision: require_approval
+  explanation: "File writes require operator approval before proceeding."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-http-request
+  subject:
+    type: tool
+    name: web_search
+  conditions:
+    tool: web_search
+    tool_group: web
+  effect:
+    decision: require_approval
+  explanation: "Web search requests require operator approval before proceeding."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-web-fetch
+  subject:
+    type: tool
+    name: web_fetch
+  conditions:
+    tool: web_fetch
+    tool_group: web
+  effect:
+    decision: require_approval
+  explanation: "Web fetch operations require operator approval before proceeding."
+  precedence: 20
+  enabled: true
+
+# Sessions: mutating (send, spawn)
+- policy_id: openclaw-require-approval-sessions-send
+  subject:
+    type: tool
+    name: sessions_send
+  conditions:
+    tool: sessions_send
+    tool_group: sessions
+  effect:
+    decision: require_approval
+  explanation: "Sending to another session requires approval."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-sessions-spawn
+  subject:
+    type: tool
+    name: sessions_spawn
+  conditions:
+    tool: sessions_spawn
+    tool_group: sessions
+  effect:
+    decision: require_approval
+  explanation: "Spawning subagent sessions requires approval."
+  precedence: 20
+  enabled: true
+
+# Messaging: outbound channel send
+- policy_id: openclaw-require-approval-message
+  subject:
+    type: tool
+    name: message
+  conditions:
+    tool: message
+    tool_group: messaging
+  effect:
+    decision: require_approval
+  explanation: "Outbound channel messages (Slack, WhatsApp, etc.) require approval."
+  precedence: 20
+  enabled: true
+
+# FS: edit and apply_patch
+- policy_id: openclaw-require-approval-edit
+  subject:
+    type: tool
+    name: edit
+  conditions:
+    tool: edit
+    tool_group: fs
+  effect:
+    decision: require_approval
+  explanation: "File edits require approval."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-apply-patch
+  subject:
+    type: tool
+    name: apply_patch
+  conditions:
+    tool: apply_patch
+    tool_group: fs
+  effect:
+    decision: require_approval
+  explanation: "Apply patch requires approval."
+  precedence: 20
+  enabled: true
+
+# Nodes: run, notify, camera, screen_record, etc.
+- policy_id: openclaw-require-approval-nodes
+  subject:
+    type: tool
+    name: nodes
+  conditions:
+    tool: nodes
+    tool_group: nodes
+  effect:
+    decision: require_approval
+  explanation: "Node operations (run, notify, camera, screen) require approval."
+  precedence: 20
+  enabled: true
+
+# Browser: navigate, act, etc.
+- policy_id: openclaw-require-approval-browser
+  subject:
+    type: tool
+    name: browser
+  conditions:
+    tool: browser
+    tool_group: ui
+  effect:
+    decision: require_approval
+  explanation: "Browser automation requires approval."
+  precedence: 20
+  enabled: true
+
+# Automation: cron, gateway
+- policy_id: openclaw-require-approval-cron
+  subject:
+    type: tool
+    name: cron
+  conditions:
+    tool: cron
+    tool_group: automation
+  effect:
+    decision: require_approval
+  explanation: "Cron job management requires approval."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-gateway
+  subject:
+    type: tool
+    name: gateway
+  conditions:
+    tool: gateway
+    tool_group: automation
+  effect:
+    decision: require_approval
+  explanation: "Gateway restart/config requires approval."
+  precedence: 20
+  enabled: true
+
+# --- Destructive: deny by default ---
+- policy_id: openclaw-deny-delete-file
+  subject:
+    type: tool
+    name: delete
+  conditions:
+    tool: delete
+    tool_group: fs
+  effect:
+    decision: deny
+  explanation: "File deletion is denied by default. Override with a higher-precedence policy if needed."
+  precedence: 30
+  enabled: true
+
+# --- Channel gateway tools: require approval ---
+- policy_id: openclaw-require-approval-whatsapp-login
+  subject:
+    type: tool
+    name: whatsapp_login
+  conditions:
+    tool: whatsapp_login
+    tool_group: messaging
+  effect:
+    decision: require_approval
+  explanation: "WhatsApp login/relink requires approval."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-slack
+  subject:
+    type: tool
+    name: slack
+  conditions:
+    tool: slack
+    tool_group: messaging
+  effect:
+    decision: require_approval
+  explanation: "Slack channel operations require approval."
+  precedence: 20
+  enabled: true
+
+- policy_id: openclaw-require-approval-discord
+  subject:
+    type: tool
+    name: discord
+  conditions:
+    tool: discord
+    tool_group: messaging
+  effect:
+    decision: require_approval
+  explanation: "Discord channel operations require approval."
+  precedence: 20
+  enabled: true
+
+# --- Media: allow read-only output ---
+- policy_id: openclaw-allow-tts
+  subject:
+    type: tool
+    name: tts
+  conditions:
+    tool: tts
+    tool_group: media
+  effect:
+    decision: allow
+  explanation: "Text-to-speech is read-only output; allow."
+  precedence: 10
+  enabled: true
+
+# --- Sessions: subagent delegation ---
+- policy_id: openclaw-require-approval-subagents
+  subject:
+    type: tool
+    name: subagents
+  conditions:
+    tool: subagents
+    tool_group: sessions
+  effect:
+    decision: require_approval
+  explanation: "Subagent delegation requires approval."
+  precedence: 20
+  enabled: true
+
+# --- Fallback: unknown / unscoped tools ---
+#
+# Clasper Core's policy engine defaults to allow when no policy matches.
+# OpenClaw's tool ecosystem is extensible (new tools appear as skills/plugins are added),
+# so we include an explicit fallback rule to avoid silently allowing new tool surfaces.
+#
+# This rule intentionally matches *any* tool. It is given a very low precedence so it
+# only "wins" when there is no more specific matching policy.
+- policy_id: openclaw-fallback-require-approval
+  subject:
+    type: tool
+  effect:
+    decision: require_approval
+  explanation: "Unscoped tool: fallback policy hit — requires local approval."
+  precedence: -100
+  enabled: true

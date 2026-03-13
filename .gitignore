@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# Scaffolded workspace (create with: npm run init-workspace)
+# Use /workspace/ to only ignore root-level workspace folder
+/workspace/
+# Keep the built-in template (templates/workspace/) in the repo
+!templates/workspace/
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.*.backup
+.env.zenvy.backup
+
+# Logs and debug
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Test artifacts
+.test-db/
+conformance-results/
+coverage/
+*.lcov
+
+# Prscope (planning + upstream PR tooling)
+.prscope/

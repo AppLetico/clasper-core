@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="clasper-control-plane" tests="6" failures="0">
+  <testcase name="capabilities endpoint"></testcase>
+  <testcase name="create task with idempotency"></testcase>
+  <testcase name="idempotency repeat create"></testcase>
+  <testcase name="list tasks"></testcase>
+  <testcase name="post message"></testcase>
+  <testcase name="post document"></testcase>
+</testsuite>

@@ -1,0 +1,9 @@
+{
+  "name": "openclaw-governed-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Secure OpenClaw agent example — tools cannot run unless Clasper approves",
+  "scripts": {
+    "start": "cd ../.. && npm run prove:governance"
+  }
+}

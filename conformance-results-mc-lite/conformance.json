@@ -1,0 +1,31 @@
+{
+  "baseUrl": "http://localhost:9006",
+  "passed": 6,
+  "failed": 0,
+  "results": [
+    {
+      "name": "capabilities endpoint",
+      "status": "passed"
+    },
+    {
+      "name": "create task with idempotency",
+      "status": "passed"
+    },
+    {
+      "name": "idempotency repeat create",
+      "status": "passed"
+    },
+    {
+      "name": "list tasks",
+      "status": "passed"
+    },
+    {
+      "name": "post message",
+      "status": "passed"
+    },
+    {
+      "name": "post document",
+      "status": "passed"
+    }
+  ]
+}

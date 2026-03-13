@@ -1,0 +1,27 @@
+# Example policy test file for: clasper test policy_tests.yaml
+# Requires Clasper Core server running and --ops-api-key
+tests:
+  - name: "allow exec ls"
+    event:
+      tenant_id: local
+      action: exec
+      tool: exec
+      context:
+        exec:
+          argv0: "ls"
+          argv: ["ls", "-la"]
+          cwd: "/workspace"
+    expected:
+      decision: allow
+
+  - name: "deny rm (if policy blocks)"
+    event:
+      tenant_id: local
+      action: exec
+      resource: "rm -rf /"
+      context:
+        exec:
+          argv0: "rm"
+          argv: ["rm", "-rf", "/"]
+    expected:
+      decision: deny

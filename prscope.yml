@@ -1,0 +1,51 @@
+# Prscope Configuration — clasper-core
+# Planning-first workflow; upstream PRs can seed plans.
+
+local_repo: .
+
+# Upstream repos (optional — seed plans from their PRs)
+# upstream:
+#   - repo: owner/upstream-repo
+
+sync:
+  state: merged
+  max_prs: 100
+  fetch_files: true
+  since: 90d
+  incremental: true
+  eval_batch_size: 25
+
+scoring:
+  min_rule_score: 0.3
+  min_final_score: 0.5
+  keyword_weight: 0.4
+  path_weight: 0.6
+
+upstream_eval:
+  enabled: true
+  model: gpt-5.2
+  temperature: 0.2
+  max_tokens: 3000
+
+planning:
+  # author_model: gpt-5.3-codex
+  # critic_model: gpt-5.2
+  author_model: gpt-4o-mini
+  critic_model: gpt-4o-mini 
+  max_adversarial_rounds: 10
+  convergence_threshold: 0.05
+  output_dir: ./plans
+  require_verified_file_references: false
+  discovery_tool_rounds: 25   # codebase tool calls during discovery (like Cursor plan mode)
+  author_tool_rounds: 25      # codebase tool calls during plan drafting/refinement
+
+  # Codebase scanner backend — controls how static memory is built from the repo.
+  #
+  #   grep     (default) — no extra deps, file-tree + README summary via LLM
+  #   repomap  — tree-sitter symbol map, closest to how Cursor understands code
+  #              Install: pip install aider-chat
+  #   repomix  — packs full repo into LLM-optimised text
+  #              Install: npm install -g repomix
+  #
+  # Run  prscope scanners  to see which backends are available on this machine.
+  scanner: repomap

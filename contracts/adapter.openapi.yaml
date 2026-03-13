@@ -1,0 +1,318 @@
+openapi: 3.0.3
+info:
+  title: Clasper Adapter Contract
+  version: v2
+  description: HTTP contract for execution adapters and telemetry ingest.
+servers:
+  - url: http://localhost:8081
+paths:
+  /adapters/register:
+    post:
+      summary: Register or update an adapter
+      security:
+        - AdapterToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdapterRegistration"
+      responses:
+        "200":
+          description: Adapter registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdapterRegistration"
+  /api/execution/request:
+    post:
+      summary: Request permission to execute
+      security:
+        - AdapterToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutionRequest"
+      responses:
+        "200":
+          description: Execution decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionDecision"
+  /api/ingest/trace:
+    post:
+      summary: Ingest execution trace
+      security:
+        - AdapterToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TraceIngest"
+      responses:
+        "200":
+          description: Trace ingested
+  /api/ingest/audit:
+    post:
+      summary: Ingest audit event
+      security:
+        - AdapterToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuditEventIngest"
+      responses:
+        "200":
+          description: Audit ingested
+  /api/ingest/cost:
+    post:
+      summary: Ingest cost metrics
+      security:
+        - AdapterToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CostMetricIngest"
+      responses:
+        "200":
+          description: Cost metrics ingested
+  /api/ingest/metrics:
+    post:
+      summary: Ingest execution metrics
+      security:
+        - AdapterToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutionMetricsIngest"
+      responses:
+        "200":
+          description: Execution metrics ingested
+  /api/ingest/violations:
+    post:
+      summary: Ingest execution violations
+      security:
+        - AdapterToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ViolationReport"
+      responses:
+        "200":
+          description: Violation report ingested
+components:
+  securitySchemes:
+    AdapterToken:
+      type: apiKey
+      in: header
+      name: X-Adapter-Token
+  schemas:
+    AdapterRegistration:
+      type: object
+      required: [adapter_id, display_name, risk_class, capabilities, version, enabled]
+      properties:
+        adapter_id:
+          type: string
+        display_name:
+          type: string
+        risk_class:
+          type: string
+          enum: [low, medium, high, critical]
+        capabilities:
+          type: array
+          items:
+            type: string
+        version:
+          type: string
+        enabled:
+          type: boolean
+    ExecutionRequest:
+      type: object
+      required: [execution_id, adapter_id, tenant_id, workspace_id, requested_capabilities]
+      properties:
+        execution_id:
+          type: string
+        adapter_id:
+          type: string
+        tenant_id:
+          type: string
+        workspace_id:
+          type: string
+        skill_id:
+          type: string
+        requested_capabilities:
+          type: array
+          items:
+            type: string
+        estimated_cost:
+          type: number
+        intent:
+          type: string
+          description: Human-readable declaration of why execution is requested
+        context:
+          type: object
+          properties:
+            external_network:
+              type: boolean
+            writes_files:
+              type: boolean
+            elevated_privileges:
+              type: boolean
+            package_manager:
+              type: string
+            targets:
+              type: array
+              items:
+                type: string
+        provenance:
+          type: object
+          properties:
+            source:
+              type: string
+              enum: [marketplace, internal, git, unknown]
+            publisher:
+              type: string
+            artifact_hash:
+              type: string
+    ExecutionScope:
+      type: object
+      required: [capabilities, max_steps, max_cost, expires_at]
+      properties:
+        capabilities:
+          type: array
+          items:
+            type: string
+        max_steps:
+          type: number
+        max_cost:
+          type: number
+        expires_at:
+          type: string
+    ExecutionDecision:
+      type: object
+      required: [allowed, execution_id]
+      properties:
+        allowed:
+          type: boolean
+        execution_id:
+          type: string
+        granted_scope:
+          $ref: "#/components/schemas/ExecutionScope"
+        blocked_reason:
+          type: string
+        requires_approval:
+          type: boolean
+    ExecutionComplete:
+      type: object
+      required: [execution_id, adapter_id, tenant_id, workspace_id, status, completed_at]
+      properties:
+        execution_id:
+          type: string
+        adapter_id:
+          type: string
+        tenant_id:
+          type: string
+        workspace_id:
+          type: string
+        status:
+          type: string
+          enum: [success, failed, blocked]
+        completed_at:
+          type: string
+        error:
+          type: string
+    TelemetryEnvelope:
+      type: object
+      required: [tenant_id, workspace_id, execution_id, trace_id, adapter_id]
+      properties:
+        tenant_id:
+          type: string
+        workspace_id:
+          type: string
+        execution_id:
+          type: string
+        trace_id:
+          type: string
+        adapter_id:
+          type: string
+    TraceIngest:
+      allOf:
+        - $ref: "#/components/schemas/TelemetryEnvelope"
+        - type: object
+          required: [trace]
+          properties:
+            trace:
+              type: object
+              additionalProperties: true
+    AuditEventIngest:
+      allOf:
+        - $ref: "#/components/schemas/TelemetryEnvelope"
+        - type: object
+          required: [event_type, occurred_at]
+          properties:
+            event_type:
+              type: string
+            message:
+              type: string
+            event_data:
+              type: object
+              additionalProperties: true
+            occurred_at:
+              type: string
+    CostMetricIngest:
+      allOf:
+        - $ref: "#/components/schemas/TelemetryEnvelope"
+        - type: object
+          required: [cost_usd, recorded_at]
+          properties:
+            cost_usd:
+              type: number
+            input_tokens:
+              type: number
+            output_tokens:
+              type: number
+            model:
+              type: string
+            provider:
+              type: string
+            recorded_at:
+              type: string
+    ExecutionMetricsIngest:
+      allOf:
+        - $ref: "#/components/schemas/TelemetryEnvelope"
+        - type: object
+          required: [step_count, duration_ms, recorded_at]
+          properties:
+            step_count:
+              type: number
+            duration_ms:
+              type: number
+            recorded_at:
+              type: string
+    ViolationReport:
+      allOf:
+        - $ref: "#/components/schemas/TelemetryEnvelope"
+        - type: object
+          required: [violation_type, message, occurred_at]
+          properties:
+            violation_type:
+              type: string
+            message:
+              type: string
+            occurred_at:
+              type: string
+            data:
+              type: object
+              additionalProperties: true

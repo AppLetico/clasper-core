@@ -1,0 +1,5327 @@
+/**
+ * Clasper Server Entry Point
+ * 
+ * Security enhancements inspired by OpenClaw 2026.2.1:
+ * - TLS 1.3 minimum for all HTTPS connections
+ * - Request timeouts
+ * - Path traversal prevention
+ * - Prompt injection sanitization
+ * 
+ * @see https://github.com/openclaw/openclaw/pulls (2026.2.1 security PRs)
+ */
+
+// Prefer TLS 1.3 minimum when writable. Node 22+ makes tls.DEFAULT_MIN_VERSION read-only.
+import * as tls from "node:tls";
+try {
+  (tls as { DEFAULT_MIN_VERSION?: string }).DEFAULT_MIN_VERSION = "TLSv1.3";
+} catch {
+  // Ignore: read-only in Node 22+
+}
+
+import Fastify from "fastify";
+import { readFileSync } from "fs";
+import { join } from "path";
+import { z } from "zod";
+import { v7 as uuidv7 } from "uuid";
+// Core
+import { config, requireEnv } from "../lib/core/config.js";
+import { initDatabase, getDatabaseStats, getDatabase } from "../lib/core/db.js";
+// Auth
+import { parseSessionKey, buildAgentToken } from "../lib/auth/agentAuth.js";
+import {
+  requireOpsContextFromHeaders,
+  OpsAuthError,
+  canAccessTenant,
+  canAccessWorkspace,
+  requireRole,
+  requirePermission,
+  getContextPermissions,
+  PermissionError
+} from "../lib/auth/opsAuth.js";
+// Providers
+import { compactHistory, runLLMTask } from "../lib/providers/openaiClient.js";
+import { streamAgentReply } from "../lib/providers/streaming.js";
+// Integrations
+import { listTasks, createTask, postMessage, postDocument } from "../lib/integrations/missionControl.js";
+import { fireWebhook, buildCompletionPayload, type WebhookConfig } from "../lib/integrations/webhooks.js";
+import { getUsageTracker } from "../lib/integrations/costs.js";
+import { validateControlPlaneVersion, CLASPER_CONTRACT_VERSION } from "../lib/integrations/controlPlaneVersion.js";
+// Workspace
+import { getWorkspaceLoader } from "../lib/workspace/workspace.js";
+import { getWorkspacePins } from "../lib/workspace/workspacePins.js";
+import { getWorkspaceEnvironments } from "../lib/workspace/workspaceEnvironments.js";
+import { analyzeImpact, analyzeImpactFromCurrent } from "../lib/workspace/impactAnalysis.js";
+import { getWorkspaceIndex, reindexWorkspace } from "../lib/context/index.js";
+// Skills
+import { getSkillsLoader } from "../lib/skills/skills.js";
+import { getSkillRegistry } from "../lib/skills/skillRegistry.js";
+import { SkillManifestSchema } from "../lib/skills/skillManifest.js";
+import { getSkillTester } from "../lib/skills/skillTester.js";
+// Tracing
+import { getTraceStore } from "../lib/tracing/traceStore.js";
+import { diffTraces, formatDiffSummary } from "../lib/tracing/traceDiff.js";
+import { getTraceAnnotations } from "../lib/tracing/traceAnnotations.js";
+import { getRetentionPolicies } from "../lib/tracing/retentionPolicies.js";
+import { buildTraceDetailView, buildTraceSummaryView } from "../lib/ops/traceViews.js";
+import { loadGovernanceMaps, buildGovernanceView } from "../lib/ops/governanceViews.js";
+import { getSkillEnvironmentUsage, getSkillUsageStats, getPermissionDiff } from "../lib/ops/skillOps.js";
+import { listToolRegistry, getToolDetails, recordToolAuthorization } from "../lib/ops/toolOps.js";
+import { getCostDashboard, getRiskDashboard, getGovernanceDashboard, getAgentsList } from "../lib/ops/dashboards.js";
+// Governance
+import {
+  getAuditLog,
+  auditLog,
+  logPolicyCreatedFromTrace,
+  logPolicyCreatedViaWizard,
+  logPolicyUpdatedViaWizard,
+} from "../lib/governance/auditLog.js";
+import type { WizardAuditMeta } from "../lib/governance/auditLog.js";
+import {
+  normalizeOutcomeFromDecision,
+  normalizeWizardMeta,
+  isUnsafeAllowWizardMeta,
+  buildPolicySummaryForAudit,
+  hashWizardMetaAttestation,
+  hashPolicySummary,
+} from "../lib/governance/wizardMeta.js";
+import { OverrideSchema, type OverrideRequest } from "../lib/ops/overrides.js";
+import { getBudgetManager } from "../lib/governance/budgetManager.js";
+import { calculateRiskScore, type RiskScoringInput } from "../lib/governance/riskScoring.js";
+import { evaluateExecutionDecision } from "../lib/governance/executionDecision.js";
+import { evaluatePolicy } from "../lib/governance/policyEngine.js";
+import { createDecision, getDecision, getLatestDecisionForExecution, listDecisions, listPendingDecisions, recordDecision, resolveDecision } from "../lib/governance/decisions.js";
+import { createExportBundle } from "../lib/exports/exportBundle.js";
+import { PolicySchema } from "../lib/policy/policySchema.js";
+import { deletePolicy, getPolicy, listPolicies, setPolicyEnabled, upsertPolicy } from "../lib/policy/policyStore.js";
+import { ingestAudit, ingestCost, ingestMetrics, ingestTrace, ingestViolation, recordBlockedExecutionTrace } from "../lib/adapters/ingest.js";
+import { requireAdapterContextFromHeaders, AdapterAuthError, type AdapterAuthContext } from "../lib/adapters/auth.js";
+import { getAdapterRegistry } from "../lib/adapters/registry.js";
+import { AdapterRegistrationSchema } from "../lib/adapters/types.js";
+import { runBuiltinRuntime } from "../lib/adapters/builtinRuntime.js";
+// Evals
+import { getEvalRunner, type EvalDataset, type EvalOptions } from "../lib/evals/evals.js";
+
+// Extend Fastify types for trace ID
+declare module 'fastify' {
+  interface FastifyRequest {
+    traceId: string;
+  }
+}
+
+/**
+ * Message in conversation history.
+ * Following OpenAI's message format for compatibility.
+ */
+const MessageSchema = z.object({
+  role: z.enum(["user", "assistant", "system"]),
+  content: z.string()
+});
+
+/**
+ * Webhook configuration schema.
+ */
+const WebhookSchema = z.object({
+  url: z.string().url(),
+  secret: z.string().optional(),
+  headers: z.record(z.string()).optional()
+});
+
+const STARTUP_BANNER = `
+   ____ _                              ____
+  / ___| | __ _ ___ _ __   ___ _ __  / ___|___  _ __ ___
+ | |   | |/ _\` / __| '_ \\ / _ \\ '__|| |   / _ \\| '__/ _ \\
+ | |___| | (_| \\__ \\ |_) |  __/ |   | |__| (_) | | |  __/
+  \\____|_|\\__,_|___/ .__/ \\___|_|    \\____\\___/|_|  \\___|
+                   |_|
+  🛡️  Governance & Audit
+  ───────────────────────────────────────────────────────
+`;
+
+const TRACE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function asStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function asStringRecord(value: unknown): Record<string, string> | undefined {
+  const obj = asObject(value);
+  if (!obj) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(obj)) {
+    if (typeof raw === "string") out[key] = raw;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function buildPolicyContextFromDecisionRecord(
+  decision: ReturnType<typeof getDecision>
+):
+  | {
+      tenant_id: string;
+      workspace_id?: string;
+      environment?: string;
+      tool?: string;
+      tool_group?: string;
+      adapter_id?: string;
+      adapter_risk_class?: string;
+      skill_state?: string;
+      risk_level?: string;
+      estimated_cost?: number;
+      requested_capabilities?: string[];
+      intent?: string;
+      context?: {
+        external_network?: boolean;
+        writes_files?: boolean;
+        elevated_privileges?: boolean;
+        package_manager?: string;
+        targets?: string[] | { paths?: string[]; hosts?: string[] };
+        exec?: {
+          argv0?: string;
+          argv?: string[];
+          cwd?: string;
+        };
+        side_effects?: {
+          writes_possible?: boolean;
+          network_possible?: boolean;
+        };
+      };
+      templateVars?: Record<string, string>;
+      provenance?: {
+        source?: string;
+        publisher?: string;
+      };
+    }
+  | null {
+  if (!decision) return null;
+  const snapshot = asObject(decision.request_snapshot);
+  const requestData = asObject(snapshot?.request);
+  if (!requestData) return null;
+  const requestContext = asObject(requestData.context);
+  const execContext = asObject(requestContext?.exec);
+  const sideEffects = asObject(requestContext?.side_effects);
+  const targetsRaw = requestContext?.targets;
+  const targetsObj = asObject(targetsRaw);
+  const targetsArray = asStringArray(targetsRaw);
+  const targetsPaths = asStringArray(targetsObj?.paths);
+  const targetsHosts = asStringArray(targetsObj?.hosts);
+
+  return {
+    tenant_id: decision.tenant_id,
+    workspace_id: decision.workspace_id,
+    environment: typeof requestData.environment === "string" ? requestData.environment : undefined,
+    tool: typeof requestData.tool === "string" ? requestData.tool : undefined,
+    tool_group: typeof requestData.tool_group === "string" ? requestData.tool_group : undefined,
+    adapter_id: decision.adapter_id,
+    adapter_risk_class:
+      typeof requestData.adapter_risk_class === "string"
+        ? requestData.adapter_risk_class
+        : undefined,
+    skill_state: typeof requestData.skill_state === "string" ? requestData.skill_state : undefined,
+    risk_level: typeof requestData.risk_level === "string" ? requestData.risk_level : undefined,
+    estimated_cost:
+      typeof requestData.estimated_cost === "number" ? requestData.estimated_cost : undefined,
+    requested_capabilities: asStringArray(requestData.requested_capabilities),
+    intent: typeof requestData.intent === "string" ? requestData.intent : undefined,
+    context: {
+      external_network:
+        typeof requestContext?.external_network === "boolean"
+          ? (requestContext.external_network as boolean)
+          : undefined,
+      writes_files:
+        typeof requestContext?.writes_files === "boolean"
+          ? (requestContext.writes_files as boolean)
+          : undefined,
+      elevated_privileges:
+        typeof requestContext?.elevated_privileges === "boolean"
+          ? (requestContext.elevated_privileges as boolean)
+          : undefined,
+      package_manager:
+        typeof requestContext?.package_manager === "string"
+          ? (requestContext.package_manager as string)
+          : undefined,
+      targets:
+        targetsPaths || targetsHosts
+          ? { paths: targetsPaths, hosts: targetsHosts }
+          : targetsArray,
+      exec: {
+        argv0: typeof execContext?.argv0 === "string" ? (execContext.argv0 as string) : undefined,
+        argv: asStringArray(execContext?.argv),
+        cwd: typeof execContext?.cwd === "string" ? (execContext.cwd as string) : undefined,
+      },
+      side_effects: {
+        writes_possible:
+          typeof sideEffects?.writes_possible === "boolean"
+            ? (sideEffects.writes_possible as boolean)
+            : undefined,
+        network_possible:
+          typeof sideEffects?.network_possible === "boolean"
+            ? (sideEffects.network_possible as boolean)
+            : undefined,
+      },
+    },
+    templateVars: asStringRecord(requestData.templateVars),
+    provenance: (() => {
+      const p = asObject(requestData.provenance);
+      if (!p) return undefined;
+      return {
+        source: typeof p.source === "string" ? p.source : undefined,
+        publisher: typeof p.publisher === "string" ? p.publisher : undefined,
+      };
+    })(),
+  };
+}
+
+export function buildApp() {
+  const isDev = process.stdout.isTTY;
+  const app = Fastify({
+    logger: isDev
+      ? {
+          transport: {
+            target: "pino-pretty",
+            options: {
+              colorize: true,
+              translateTime: "HH:MM:ss",
+              ignore: "pid,hostname",
+              singleLine: true,
+            },
+          },
+        }
+      : true,
+  });
+  const opsUiRoot = join(process.cwd(), "src", "ops-ui");
+
+  // Startup banner (stdout so it's readable in dev)
+  const base = `http://localhost:${config.port}`;
+  if (process.stdout.isTTY) {
+    console.log("\x1b[36m" + STARTUP_BANNER + "\x1b[0m");
+    console.log("  \x1b[1m▶\x1b[0m  API & Ops Console: \x1b[4m%s\x1b[0m", base);
+    console.log("  \x1b[1m▶\x1b[0m  Health: \x1b[4m%s/health\x1b[0m\n", base);
+  }
+
+  // Initialize database
+  try {
+    initDatabase();
+    app.log.info("Database initialized");
+  } catch (err) {
+    app.log.error({ err }, "Failed to initialize database");
+  }
+
+  // ============================================================================
+  // Trace ID Hook - Every request gets a trace ID for correlation
+  // ============================================================================
+  app.addHook('onRequest', async (request, reply) => {
+    // Use existing trace ID from header or generate a new one
+    const existingTraceId = request.headers['x-trace-id'];
+    request.traceId = typeof existingTraceId === 'string' ? existingTraceId : uuidv7();
+    
+    // Add trace ID to response headers
+    reply.header('x-trace-id', request.traceId);
+  });
+
+  const SendSchema = z.object({
+    user_id: z.string(),
+    session_key: z.string(),
+    message: z.string(),
+    // Conversation history (OpenClaw-inspired context management)
+    // Backend can inject prior messages for multi-turn conversations
+    messages: z.array(MessageSchema).optional(),
+    // Task handling options (all optional for flexibility):
+    // - task_id: Use this specific task (backend-owned task creation)
+    // - task_title: Find or create a task with this title
+    // - task_description: Description for auto-created tasks
+    // - task_metadata: Metadata for auto-created tasks
+    task_id: z.string().optional(),
+    task_title: z.string().optional(),
+    task_description: z.string().optional(),
+    task_metadata: z.record(z.any()).optional(),
+    metadata: z.record(z.any()).optional(),
+    // Webhook callback (optional)
+    webhook: WebhookSchema.optional(),
+    // Streaming mode (optional)
+    stream: z.boolean().optional()
+  });
+
+  /**
+   * Ops Console identity endpoint.
+   * GET /ops/api/me
+   *
+   * Returns user identity, effective permissions, and access scope.
+   * UI uses this to deterministically enable/disable actions.
+   */
+  app.get("/ops/api/me", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const permissions = getContextPermissions(context);
+
+      return reply.send({
+        user: {
+          id: context.userId,
+          role: context.role,
+          roles: context.roles,
+          tenant_id: context.tenantId,
+          workspace_id: context.workspaceId,
+          allowed_tenants: context.allowedTenants
+        },
+        permissions,
+        scope: {
+          tenants: context.allowedTenants.length > 0
+            ? context.allowedTenants
+            : [context.tenantId],
+          workspaces: context.workspaceId ? [context.workspaceId] : []
+        }
+      });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Ops auth failed" });
+    }
+  });
+
+  /**
+   * Ops SSE endpoint. Core does not push real-time events; this stub keeps the
+   * client connection open so the UI does not 404 or spam reconnect.
+   */
+  app.get("/ops/api/events", async (request, reply) => {
+    try {
+      await requireOpsContextFromHeaders(request.headers);
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Ops auth failed" });
+    }
+    request.log.info({ msg: "ops SSE client connected" });
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive"
+    });
+    reply.raw.write("event: connected\ndata: {}\n\n");
+    const heartbeat = setInterval(() => {
+      try {
+        reply.raw.write(": heartbeat\n\n");
+      } catch {
+        clearInterval(heartbeat);
+      }
+    }, 30000);
+    request.raw.on("close", () => {
+      clearInterval(heartbeat);
+    });
+  });
+
+  app.get("/", async (_request, reply) => {
+    return reply.redirect("/ops");
+  });
+
+  app.get("/ops", async (_request, reply) => {
+    try {
+      const html = readFileSync(join(opsUiRoot, "index.html"), "utf-8");
+      return reply.type("text/html").send(html);
+    } catch (error) {
+      return reply.status(500).send({ error: "Ops UI not available" });
+    }
+  });
+
+  app.get("/ops/app.js", async (_request, reply) => {
+    try {
+      const js = readFileSync(join(opsUiRoot, "dist", "app.js"), "utf-8");
+      return reply.type("application/javascript").send(js);
+    } catch (error) {
+      return reply.status(500).send({ error: "Ops UI script not available" });
+    }
+  });
+
+  app.get("/ops/styles.css", async (_request, reply) => {
+    try {
+      const css = readFileSync(join(opsUiRoot, "styles.css"), "utf-8");
+      return reply.type("text/css").send(css);
+    } catch (error) {
+      return reply.status(500).send({ error: "Ops UI styles not available" });
+    }
+  });
+
+  app.get("/ops/favicon.svg", async (_request, reply) => {
+    try {
+      const svg = readFileSync(join(opsUiRoot, "favicon.svg"), "utf-8");
+      return reply.type("image/svg+xml").send(svg);
+    } catch (error) {
+      return reply.status(500).send({ error: "Ops UI favicon not available" });
+    }
+  });
+
+  app.get("/ops/favicon.ico", async (_request, reply) => {
+    try {
+      const ico = readFileSync(join(opsUiRoot, "favicon.ico"));
+      return reply.type("image/x-icon").send(ico);
+    } catch (error) {
+      return reply.status(500).send({ error: "Ops UI favicon.ico not available" });
+    }
+  });
+
+  app.get("/ops/logo.svg", async (_request, reply) => {
+    try {
+      const svg = readFileSync(join(opsUiRoot, "logo.svg"), "utf-8");
+      return reply.type("image/svg+xml").send(svg);
+    } catch (error) {
+      return reply.status(500).send({ error: "Ops UI logo not available" });
+    }
+  });
+
+  app.post("/workspace/reindex", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    try {
+      const stats = await reindexWorkspace();
+      return reply.send(stats);
+    } catch (error) {
+      return reply.status(500).send({ error: "Failed to reindex workspace" });
+    }
+  });
+
+  app.get("/context/stats", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const index = getWorkspaceIndex();
+    const stats = index.getStats();
+    return reply.send({
+      ...stats,
+      embeddingProvider: config.embeddingProvider || "none"
+    });
+  });
+
+  const OpsTraceListQuerySchema = z.object({
+    tenant_id: z.string().optional(),
+    workspace_id: z.string().optional(),
+    agent_role: z.string().optional(),
+    agent_id: z.string().optional(),
+    adapter_id: z.string().optional(),
+    start_date: z.string().optional(),
+    end_date: z.string().optional(),
+    label_key: z.string().optional(),
+    label_value: z.string().optional(),
+    status: z.enum(["success", "error"]).optional(),
+    governance_decision: z.enum(["allow", "deny"]).optional(),
+    min_cost: z.coerce.number().optional(),
+    max_cost: z.coerce.number().optional(),
+    risk_level: z.string().optional(),
+    trust_status: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    offset: z.coerce.number().int().min(0).default(0)
+  });
+
+  app.get("/ops/api/traces", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const parsed = OpsTraceListQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+
+      const query = parsed.data;
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+      if (!canAccessWorkspace(context, query.workspace_id)) {
+        return reply.status(403).send({ error: "Workspace access denied" });
+      }
+
+      const traceStore = getTraceStore();
+      const result = traceStore.list({
+        tenantId,
+        workspaceId: query.workspace_id,
+        agentRole: query.agent_role,
+        agentId: query.agent_id,
+        adapterId: query.adapter_id,
+        startDate: query.start_date,
+        endDate: query.end_date,
+        limit: query.limit,
+        offset: query.offset
+      });
+      request.log.info({
+        msg: "ops traces list",
+        tenant_id: tenantId,
+        workspace_id: query.workspace_id ?? null,
+        start_date: query.start_date ?? null,
+        end_date: query.end_date ?? null,
+        limit: query.limit,
+        offset: query.offset,
+        total: result.total,
+        returned: result.traces.length
+      });
+
+      const annotationsStore = getTraceAnnotations();
+      const executionIds = result.traces
+        .map((t) => (t.labels as any)?.execution_id)
+        .filter((x): x is string => typeof x === "string" && x.length > 0);
+      const { decisionsByExecutionId, toolAuthsByExecutionId } = loadGovernanceMaps(tenantId, executionIds);
+
+      let summaries = result.traces.map((trace) => {
+        const executionId = (trace.labels as any)?.execution_id || null;
+        const governance = buildGovernanceView({
+          trace,
+          executionId,
+          decisionRow: executionId ? decisionsByExecutionId.get(executionId) : undefined,
+          toolAuthRows: executionId ? toolAuthsByExecutionId.get(executionId) : undefined
+        });
+
+        return buildTraceSummaryView({
+          trace,
+          annotations: annotationsStore.getForTrace(trace.id),
+          governance
+        });
+      });
+
+      if (query.label_key) {
+        const key = query.label_key;
+        summaries = summaries.filter((trace) =>
+          query.label_value
+            ? trace.labels?.[key] === query.label_value
+            : trace.labels?.[key] !== undefined
+        );
+      }
+      if (query.status) {
+        summaries = summaries.filter((trace) => trace.status === query.status);
+      }
+      if (query.min_cost !== undefined) {
+        summaries = summaries.filter((trace) => trace.cost >= query.min_cost!);
+      }
+      if (query.max_cost !== undefined) {
+        summaries = summaries.filter((trace) => trace.cost <= query.max_cost!);
+      }
+      if (query.risk_level) {
+        summaries = summaries.filter((trace) => trace.risk.level === query.risk_level);
+      }
+      if (query.trust_status) {
+        summaries = summaries.filter((trace) => trace.trust_status === query.trust_status);
+      }
+      if (query.governance_decision) {
+        const gd = query.governance_decision;
+        if (gd === "allow") {
+          summaries = summaries.filter((trace) =>
+            trace.governance?.decision === "allow" || trace.governance?.decision === "approved_local"
+          );
+        } else if (gd === "deny") {
+          summaries = summaries.filter((trace) => trace.governance?.decision === "deny");
+        }
+      }
+
+      return reply.send({
+        traces: summaries,
+        total: result.total,
+        filtered: summaries.length,
+        has_more: result.hasMore,
+        limit: query.limit,
+        offset: query.offset
+      });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load traces" });
+    }
+  });
+
+  app.get("/ops/api/traces/:id", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const { id } = request.params as { id: string };
+      const query = request.query as { tenant_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const traceStore = getTraceStore();
+      const trace = traceStore.getForTenant(id, tenantId);
+      if (!trace) {
+        return reply.status(404).send({ error: "Trace not found" });
+      }
+      if (!canAccessWorkspace(context, trace.workspaceId)) {
+        return reply.status(403).send({ error: "Workspace access denied" });
+      }
+
+      const annotationsStore = getTraceAnnotations();
+      const executionId = (trace.labels as any)?.execution_id || null;
+      const { decisionsByExecutionId, toolAuthsByExecutionId } = loadGovernanceMaps(tenantId, executionId ? [executionId] : []);
+      const governance = buildGovernanceView({
+        trace,
+        executionId,
+        decisionRow: executionId ? decisionsByExecutionId.get(executionId) : undefined,
+        toolAuthRows: executionId ? toolAuthsByExecutionId.get(executionId) : undefined
+      });
+      const detail = buildTraceDetailView({
+        trace,
+        annotations: annotationsStore.getForTrace(trace.id),
+        role: context.role,
+        governance
+      });
+
+      return reply.send({ trace: detail });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load trace" });
+    }
+  });
+
+  /**
+   * Simulate policy evaluation on a trace (Phase 3).
+   * Re-runs policy evaluation with the request from the decision record using the current policy bundle.
+   */
+  app.post("/ops/api/traces/:id/simulate", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "audit:view");
+      const { id } = request.params as { id: string };
+      const query = request.query as { tenant_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const traceStore = getTraceStore();
+      const trace = traceStore.getForTenant(id, tenantId);
+      if (!trace) {
+        return reply.status(404).send({ error: "Trace not found" });
+      }
+      if (!canAccessWorkspace(context, trace.workspaceId)) {
+        return reply.status(403).send({ error: "Workspace access denied" });
+      }
+
+      const executionId = (trace.labels as any)?.execution_id || null;
+      if (!executionId) {
+        return reply.status(400).send({ error: "Trace has no execution_id; cannot simulate" });
+      }
+
+      const { decisionsByExecutionId } = loadGovernanceMaps(tenantId, [executionId]);
+      const decisionRow = decisionsByExecutionId.get(executionId);
+      if (!decisionRow?.request_snapshot) {
+        return reply.status(400).send({ error: "No decision record for this trace; simulate requires a persisted decision" });
+      }
+
+      let snapshot: { request?: Record<string, unknown>; decision?: Record<string, unknown> };
+      try {
+        snapshot = typeof decisionRow.request_snapshot === "string"
+          ? JSON.parse(decisionRow.request_snapshot)
+          : decisionRow.request_snapshot;
+      } catch {
+        return reply.status(400).send({ error: "Invalid decision snapshot" });
+      }
+
+      const req = snapshot?.request as Record<string, unknown> | undefined;
+      if (!req || typeof req !== "object") {
+        return reply.status(400).send({ error: "Decision snapshot missing request" });
+      }
+
+      const policyContext = {
+        tenant_id: (req.tenant_id as string) || tenantId,
+        workspace_id: (req.workspace_id as string) || trace.workspaceId,
+        environment: (req.environment as string) || (trace as { environment?: string }).environment,
+        tool: req.tool as string | undefined,
+        tool_group: req.tool_group as string | undefined,
+        adapter_id: (req.adapter_id as string) || (trace as { adapter_id?: string }).adapter_id,
+        adapter_risk_class: req.adapter_risk_class as string | undefined,
+        skill_state: req.skill_state as string | undefined,
+        risk_level: (snapshot?.decision as Record<string, unknown>)?.risk_level as string | undefined,
+        estimated_cost: req.estimated_cost as number | undefined,
+        requested_capabilities: (req.requested_capabilities as string[]) || [],
+        intent: req.intent as string | undefined,
+        context: req.context as Record<string, unknown> | undefined,
+        templateVars: req.templateVars as Record<string, string> | undefined,
+        provenance: req.provenance as Record<string, unknown> | undefined,
+        agent_id: req.agent_id as string | undefined,
+        agent_role: req.agent_role as string | undefined,
+      };
+
+      const simulated = evaluatePolicy(policyContext);
+
+      const originalDecision = snapshot?.decision as Record<string, unknown> | undefined;
+      return reply.send({
+        trace_id: id,
+        execution_id: executionId,
+        original: {
+          decision: originalDecision?.decision ?? null,
+          matched_policies: (originalDecision?.matched_policies as string[]) ?? [],
+          risk_score: originalDecision?.risk_score ?? null,
+          risk_level: originalDecision?.risk_level ?? null,
+          policy_bundle_hash: originalDecision?.policy_bundle_hash ?? null,
+        },
+        simulated: {
+          decision: simulated.decision,
+          matched_policies: simulated.matched_policies,
+          decision_trace: simulated.decision_trace,
+          explanation: simulated.explanation,
+          policy_bundle_hash: (simulated as { policy_bundle_hash?: string }).policy_bundle_hash,
+        },
+      });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles,
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Policy simulation failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Replay a trace — returns replay context for policy simulation and debugging.
+   * Full replay (re-execution) is planned; for now returns original trace + context.
+   */
+  app.post("/ops/api/traces/:id/replay", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "audit:view");
+      const { id } = request.params as { id: string };
+      const query = request.query as { tenant_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const traceStore = getTraceStore();
+      const trace = traceStore.getForTenant(id, tenantId);
+      if (!trace) {
+        return reply.status(404).send({ error: "Trace not found" });
+      }
+      if (!canAccessWorkspace(context, trace.workspaceId)) {
+        return reply.status(403).send({ error: "Workspace access denied" });
+      }
+
+      const replayContext = traceStore.getReplayContext(id);
+      if (!replayContext) {
+        return reply.status(404).send({ error: "Replay context not available" });
+      }
+
+      return reply.send({
+        status: "pending",
+        message: "Replay returns context for debugging; full re-execution coming soon",
+        original_trace: replayContext.trace,
+        replay_config: { inputMessage: replayContext.inputMessage, skillVersions: replayContext.skillVersions },
+      });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles,
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Replay failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  const OpsTraceDiffSchema = z.object({
+    base_trace_id: z.string(),
+    compare_trace_id: z.string(),
+    include_summary: z.boolean().optional().default(true)
+  });
+
+  app.post("/ops/api/traces/diff", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const parsed = OpsTraceDiffSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const traceStore = getTraceStore();
+      const baseTrace = traceStore.get(parsed.data.base_trace_id);
+      const compareTrace = traceStore.get(parsed.data.compare_trace_id);
+
+      if (!baseTrace || !compareTrace) {
+        return reply.status(404).send({ error: "Trace not found" });
+      }
+
+      if (!canAccessTenant(context, baseTrace.tenantId) || !canAccessTenant(context, compareTrace.tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const diff = diffTraces(baseTrace, compareTrace);
+      const response: Record<string, unknown> = { diff };
+      if (parsed.data.include_summary) {
+        response.summary_text = formatDiffSummary(diff);
+      }
+
+      return reply.send(response);
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to diff traces" });
+    }
+  });
+
+  const OpsSkillListQuerySchema = z.object({
+    q: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    offset: z.coerce.number().int().min(0).default(0)
+  });
+
+  app.get("/ops/api/skills/registry", async (request, reply) => {
+    try {
+      await requireOpsContextFromHeaders(request.headers);
+      const parsed = OpsSkillListQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+
+      const registry = getSkillRegistry();
+      const result = registry.search(parsed.data.q || "", {
+        limit: parsed.data.limit,
+        offset: parsed.data.offset,
+        includeDeprecated: true
+      });
+
+      const usageStats = getSkillUsageStats();
+      const envUsage = getSkillEnvironmentUsage();
+
+      return reply.send({
+        skills: result.skills.map((skill) => ({
+          name: skill.name,
+          version: skill.version,
+          description: skill.description,
+          state: skill.state,
+          permissions: skill.manifest.permissions?.tools || [],
+          last_used: usageStats[skill.name]?.last_used,
+          usage_count: usageStats[skill.name]?.usage_count || 0,
+          environments: envUsage[skill.name]?.environments || [],
+          permission_diff: getPermissionDiff(skill.name, skill.version)
+        })),
+        total: result.total,
+        has_more: result.hasMore
+      });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load skills" });
+    }
+  });
+
+  app.get("/ops/api/tools/registry", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const query = request.query as { tenant_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const tools = listToolRegistry(tenantId);
+      return reply.send({ tools, total: tools.length });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load tool registry" });
+    }
+  });
+
+  app.get("/ops/api/tools/:name", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const { name } = request.params as { name: string };
+      const query = request.query as { tenant_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const history = getToolDetails(tenantId, name);
+      return reply.send({ history });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load tool details" });
+    }
+  });
+
+  const OpsSkillPromoteSchema = z.object({
+    target_state: z.enum(["draft", "tested", "approved", "active", "deprecated"])
+  });
+
+  app.post("/ops/api/skills/:name/:version/promote", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "skill:promote");
+
+      const parsed = OpsSkillPromoteSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const { name, version } = request.params as { name: string; version: string };
+      const registry = getSkillRegistry();
+      const skill = registry.getAnyState(name, version);
+      if (!skill) {
+        return reply.status(404).send({ error: "Skill not found" });
+      }
+
+      const result = registry.promote(name, version, parsed.data.target_state);
+      if (!result.success) {
+        return reply.status(400).send({ error: result.error || "Promotion failed" });
+      }
+
+      const auditLog = getAuditLog();
+      auditLog.log("skill_state_changed", {
+        tenantId: "system",
+        userId: context.userId,
+        eventData: {
+          skill_name: name,
+          skill_version: version,
+          from_state: skill.state,
+          to_state: parsed.data.target_state
+        }
+      });
+
+      return reply.send({
+        status: "ok",
+        skill: {
+          name: result.skill?.name,
+          version: result.skill?.version,
+          state: result.skill?.state,
+          previous_state: skill.state,
+          permission_diff: getPermissionDiff(name, version)
+        }
+      });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to promote skill" });
+    }
+  });
+
+  app.get("/ops/api/dashboards/cost", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const query = request.query as { tenant_id?: string; workspace_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+      if (!canAccessWorkspace(context, query.workspace_id)) {
+        return reply.status(403).send({ error: "Workspace access denied" });
+      }
+
+      const dashboard = getCostDashboard(tenantId, { workspaceId: query.workspace_id });
+      request.log.info({
+        msg: "ops cost dashboard",
+        tenant_id: tenantId,
+        workspace_id: query.workspace_id ?? null,
+        daily_rows: dashboard.daily?.length ?? 0
+      });
+      return reply.send({ dashboard });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load cost dashboard" });
+    }
+  });
+
+  app.get("/ops/api/dashboards/risk", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const query = request.query as { tenant_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      return reply.send({ dashboard: getRiskDashboard(tenantId) });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load risk dashboard" });
+    }
+  });
+
+  app.get("/ops/api/dashboards/governance", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const query = request.query as { tenant_id?: string; workspace_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+      if (!canAccessWorkspace(context, query.workspace_id)) {
+        return reply.status(403).send({ error: "Workspace access denied" });
+      }
+
+      const dashboard = getGovernanceDashboard(tenantId, { workspaceId: query.workspace_id });
+      return reply.send({ dashboard });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load governance dashboard" });
+    }
+  });
+
+  app.get("/ops/api/agents", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      const query = request.query as { tenant_id?: string; workspace_id?: string };
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+      if (!canAccessWorkspace(context, query.workspace_id)) {
+        return reply.status(403).send({ error: "Workspace access denied" });
+      }
+
+      const agents = getAgentsList(tenantId, { workspaceId: query.workspace_id });
+      return reply.send({ agents });
+    } catch (error) {
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load agents" });
+    }
+  });
+
+  /**
+   * Ops Console audit log endpoint.
+   * GET /ops/api/audit
+   *
+   * Requires: operator+ role (audit:view permission)
+   * Query: tenant_id, workspace_id, event_type, start_date, end_date, limit, offset
+   */
+  const OpsAuditQuerySchema = z.object({
+    tenant_id: z.string().optional(),
+    workspace_id: z.string().optional(),
+    event_type: z.string().optional(),
+    start_date: z.string().optional(),
+    end_date: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    offset: z.coerce.number().int().min(0).default(0)
+  });
+
+  app.get("/ops/api/audit", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "audit:view");
+
+      const parsed = OpsAuditQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+
+      const query = parsed.data;
+      const tenantId = query.tenant_id || context.tenantId;
+
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const auditLog = getAuditLog();
+      const traceStore = getTraceStore();
+      const result = auditLog.query({
+        tenantId,
+        workspaceId: query.workspace_id,
+        eventType: query.event_type as any,
+        startDate: query.start_date,
+        endDate: query.end_date,
+        limit: query.limit,
+        offset: query.offset
+      });
+
+      return reply.send({
+        entries: result.entries.map(entry => {
+          const ed = entry.eventData as Record<string, unknown>;
+          const decisionId = typeof ed["decision_id"] === "string" ? ed["decision_id"] : undefined;
+          const executionId = typeof ed["execution_id"] === "string" ? ed["execution_id"] : undefined;
+          const policyId = typeof ed["policy_id"] === "string" ? ed["policy_id"] : undefined;
+          const skillId = typeof ed["skill_id"] === "string" ? ed["skill_id"] : undefined;
+          const adapterId = typeof ed["adapter_id"] === "string" ? ed["adapter_id"] : undefined;
+          const tool = typeof ed["tool"] === "string" ? ed["tool"] : undefined;
+          const targets = Array.isArray(ed["targets"])
+            ? (ed["targets"] as unknown[]).filter((v): v is string => typeof v === "string")
+            : [];
+          const actorLabel =
+            entry.userId ||
+            (typeof ed["approved_by"] === "string" ? ed["approved_by"] : undefined) ||
+            (typeof ed["requested_by"] === "string" ? ed["requested_by"] : undefined) ||
+            (adapterId ? `adapter:${adapterId}` : "system");
+          const actionSummary = (() => {
+            if (entry.eventType === "policy_decision_pending") {
+              return `Approval requested${tool ? ` for ${tool}` : ""}`;
+            }
+            if (entry.eventType === "policy_decision_resolved") {
+              const status = typeof ed["status"] === "string" ? ed["status"] : "resolved";
+              return `Approval ${status}${tool ? ` for ${tool}` : ""}`;
+            }
+            if (entry.eventType === "adapter_audit_event") {
+              const nestedType = typeof ed["event_type"] === "string" ? ed["event_type"] : "adapter_event";
+              return `Adapter event: ${nestedType}`;
+            }
+            if (entry.eventType === "approval_auto_allowed_in_core") {
+              return "Auto-approved by Core simulate mode";
+            }
+            return entry.eventType.replaceAll("_", " ");
+          })();
+          const decisionRecord = decisionId ? getDecision(decisionId) : null;
+          const originalRequest = (() => {
+            const snapshot = decisionRecord?.request_snapshot as Record<string, unknown> | null | undefined;
+            const request = snapshot && typeof snapshot === "object"
+              ? (snapshot["request"] as Record<string, unknown> | undefined)
+              : undefined;
+            if (!request || typeof request !== "object") return null;
+            const reqTargets = Array.isArray((request["context"] as Record<string, unknown> | undefined)?.["targets"])
+              ? (((request["context"] as Record<string, unknown>)["targets"] as unknown[]).filter((v): v is string => typeof v === "string"))
+              : [];
+            const requestedCapabilities = Array.isArray(request["requested_capabilities"])
+              ? ((request["requested_capabilities"] as unknown[]).filter((v): v is string => typeof v === "string"))
+              : [];
+            return {
+              tool: typeof request["tool"] === "string" ? request["tool"] : null,
+              tool_group: typeof request["tool_group"] === "string" ? request["tool_group"] : null,
+              intent: typeof request["intent"] === "string" ? request["intent"] : null,
+              requested_capabilities: requestedCapabilities,
+              targets: reqTargets,
+              adapter_id: typeof request["adapter_id"] === "string" ? request["adapter_id"] : null,
+              raw: request,
+            };
+          })();
+          const originalPolicy = (() => {
+            const snapshot = decisionRecord?.request_snapshot as Record<string, unknown> | null | undefined;
+            const policy = snapshot && typeof snapshot === "object"
+              ? (snapshot["decision"] as Record<string, unknown> | undefined)
+              : undefined;
+            if (!policy || typeof policy !== "object") return null;
+            const matchedPolicies = Array.isArray(policy["matched_policies"])
+              ? ((policy["matched_policies"] as unknown[]).filter((v): v is string => typeof v === "string"))
+              : [];
+            return {
+              decision: typeof policy["decision"] === "string" ? policy["decision"] : null,
+              blocked_reason: typeof policy["blocked_reason"] === "string" ? policy["blocked_reason"] : null,
+              explanation: typeof policy["explanation"] === "string" ? policy["explanation"] : null,
+              matched_policies: matchedPolicies,
+              raw: policy,
+            };
+          })();
+          const requestTargets = Array.isArray(originalRequest?.targets)
+            ? (originalRequest.targets as unknown[]).filter((v): v is string => typeof v === "string")
+            : [];
+          const targetId = entry.traceId || decisionId || executionId || policyId || skillId || adapterId;
+          const targetType = entry.traceId
+            ? "trace"
+            : decisionId
+              ? "decision"
+              : executionId
+                ? "execution"
+                : policyId
+                  ? "policy"
+                  : skillId
+                    ? "skill"
+                    : adapterId
+                      ? "adapter"
+                      : "unknown";
+          const bestTargets = targets.length > 0 ? targets : requestTargets;
+          const targetSummary =
+            bestTargets.length > 0
+              ? bestTargets.join(", ")
+              : targetId
+                ? `${targetType}:${targetId}`
+                : null;
+
+          const agentRole = (() => {
+            if (entry.traceId && tenantId) {
+              const trace = traceStore.getForTenant(entry.traceId, tenantId);
+              if (trace?.agentRole) return trace.agentRole;
+            }
+            const rawReq = (() => {
+              const snapshot = decisionRecord?.request_snapshot as Record<string, unknown> | null | undefined;
+              const req = snapshot && typeof snapshot === "object"
+                ? (snapshot["request"] as Record<string, unknown> | undefined)
+                : undefined;
+              return req;
+            })();
+            if (typeof rawReq?.["agent_role"] === "string") return rawReq["agent_role"];
+            if (typeof ed["agent_role"] === "string") return ed["agent_role"];
+            if (adapterId === "openclaw-local" || adapterId?.startsWith("openclaw")) return "openclaw";
+            return null;
+          })();
+
+          return {
+            id: entry.id,
+            event_type: entry.eventType,
+            tenant_id: entry.tenantId,
+            workspace_id: entry.workspaceId,
+            trace_id: entry.traceId,
+            user_id: entry.userId,
+            actor: actorLabel,
+            agent_role: agentRole ?? undefined,
+            target_id: targetId,
+            target_type: targetType,
+            target_summary: targetSummary,
+            action_summary: actionSummary,
+            original_request: originalRequest,
+            original_policy: originalPolicy,
+            event_data: entry.eventData,
+            created_at: entry.createdAt
+          };
+        }),
+        total: result.total,
+        has_more: result.hasMore,
+        limit: query.limit,
+        offset: query.offset
+      });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load audit log" });
+    }
+  });
+
+  app.get("/ops/api/audit-chain/export", async (_request, reply) => {
+    return reply.status(501).send({
+      error: "Audit chain export is Cloud-only. Clasper Core provides self-attested logs only.",
+    });
+  });
+
+  app.post("/ops/api/exports", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "audit:view");
+
+      const ExportSchema = z.object({
+        tenant_id: z.string().optional(),
+        workspace_id: z.string().optional(),
+        trace_id: z.string().optional(),
+        start_date: z.string().optional(),
+        end_date: z.string().optional(),
+      });
+
+      const parsed = ExportSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const { bundlePath, bundleName } = await createExportBundle({
+        tenantId,
+        workspaceId: parsed.data.workspace_id,
+        traceId: parsed.data.trace_id,
+        startDate: parsed.data.start_date,
+        endDate: parsed.data.end_date,
+      });
+
+      reply.header("Content-Type", "application/gzip");
+      reply.header("Content-Disposition", `attachment; filename="${bundleName}"`);
+      return reply.send(readFileSync(bundlePath));
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to export bundle" });
+    }
+  });
+
+  app.get("/ops/api/adapters", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "adapter:view");
+
+      const AdapterListQuerySchema = z.object({
+        tenant_id: z.string().optional(),
+        limit: z.coerce.number().int().min(1).max(500).optional(),
+        offset: z.coerce.number().int().min(0).optional()
+      });
+
+      const parsed = AdapterListQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const registry = getAdapterRegistry();
+      const adapters = registry.list(tenantId, {
+        limit: parsed.data.limit,
+        offset: parsed.data.offset
+      });
+
+      return reply.send({
+        adapters,
+        total: adapters.length,
+        limit: parsed.data.limit || 100,
+        offset: parsed.data.offset || 0
+      });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load adapters" });
+    }
+  });
+
+  app.post("/ops/api/adapters/telemetry-key", async (_request, reply) => {
+    return reply.status(501).send({
+      error: "Telemetry signing keys are Cloud-only in the OSS distribution.",
+    });
+  });
+
+  app.post("/ops/api/adapters/telemetry-key/revoke", async (_request, reply) => {
+    return reply.status(501).send({
+      error: "Telemetry signing key revocation is Cloud-only in the OSS distribution.",
+    });
+  });
+
+  app.get("/ops/api/tool-authorizations", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "audit:view");
+
+      const QuerySchema = z.object({
+        tenant_id: z.string().optional(),
+        adapter_id: z.string().optional(),
+        execution_id: z.string().optional(),
+        tool: z.string().optional(),
+        limit: z.coerce.number().int().min(1).max(500).optional(),
+        offset: z.coerce.number().int().min(0).optional(),
+      });
+
+      const parsed = QuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const limit = parsed.data.limit || 100;
+      const offset = parsed.data.offset || 0;
+      const conditions: string[] = ["tenant_id = ?"];
+      const params: unknown[] = [tenantId];
+
+      if (parsed.data.adapter_id) {
+        conditions.push("adapter_id = ?");
+        params.push(parsed.data.adapter_id);
+      }
+      if (parsed.data.execution_id) {
+        conditions.push("execution_id = ?");
+        params.push(parsed.data.execution_id);
+      }
+      if (parsed.data.tool) {
+        conditions.push("tool = ?");
+        params.push(parsed.data.tool);
+      }
+
+      const whereClause = conditions.join(" AND ");
+      const db = getDatabase();
+      const rows = db
+        .prepare(
+          `
+          SELECT * FROM tool_authorizations
+          WHERE ${whereClause}
+          ORDER BY created_at DESC
+          LIMIT ? OFFSET ?
+        `
+        )
+        .all(...params, limit, offset) as Array<Record<string, unknown>>;
+
+      return reply.send({
+        authorizations: rows,
+        total: rows.length,
+        limit,
+        offset,
+      });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load tool authorizations" });
+    }
+  });
+
+  app.get("/ops/api/tool-authorizations/:id", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "audit:view");
+
+      const id = (request.params as { id?: string }).id;
+      if (!id) {
+        return reply.status(400).send({ error: "Missing id" });
+      }
+
+      const db = getDatabase();
+      const row = db
+        .prepare("SELECT * FROM tool_authorizations WHERE id = ?")
+        .get(id) as Record<string, unknown> | undefined;
+
+      if (!row) {
+        return reply.status(404).send({ error: "Not found" });
+      }
+
+      return reply.send({ authorization: row });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load tool authorization" });
+    }
+  });
+
+  /**
+   * Compact history endpoint.
+   * Summarizes conversation history to reduce token usage.
+   * Following OpenClaw's compaction pattern.
+   */
+  const CompactSchema = z.object({
+    messages: z.array(MessageSchema).min(1),
+    instructions: z.string().optional(),
+    keep_recent: z.number().int().min(0).default(2)
+  });
+
+  app.post("/compact", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = CompactSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const { messages, instructions, keep_recent } = parsed.data;
+
+    try {
+      const result = await compactHistory({
+        messages,
+        instructions,
+        keepRecent: keep_recent
+      });
+
+      return reply.send({
+        status: "ok",
+        compacted_messages: result.compactedMessages,
+        usage: result.usage,
+        original_count: messages.length,
+        compacted_count: result.compactedMessages.length
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Compaction failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * LLM Task endpoint for structured JSON output.
+   * Following OpenClaw's llm-task pattern for workflow engines.
+   */
+  const LLMTaskSchema = z.object({
+    prompt: z.string(),
+    input: z.any().optional(),
+    schema: z.record(z.any()).optional(),
+    model: z.string().optional(),
+    temperature: z.number().min(0).max(2).optional(),
+    max_tokens: z.number().int().positive().optional()
+  });
+
+  const ExecutionDecisionRequestSchema = z.object({
+    execution_id: z.string().optional(),
+    tenant_id: z.string(),
+    workspace_id: z.string(),
+    environment: z.string().optional(),
+    adapter_id: z.string(),
+    adapter_risk_class: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+    requested_capabilities: z.array(z.string()),
+    max_steps: z.number().int().positive().optional(),
+    max_cost: z.number().optional(),
+    estimated_cost: z.number().optional(),
+    tool_count: z.number().int().nonnegative().default(0),
+    tool_names: z.array(z.string()).optional(),
+    skill_state: z.enum(['draft', 'tested', 'approved', 'active', 'deprecated']).optional(),
+    temperature: z.number().optional(),
+    data_sensitivity: z.enum(['none', 'low', 'medium', 'high', 'pii']).optional(),
+    skill_tested: z.boolean().optional(),
+    skill_pinned: z.boolean().optional(),
+    custom_flags: z.array(z.string()).optional(),
+    rbac_allowed: z.boolean().optional(),
+    callback_url: z.string().url().optional(),
+    intent: z.string().optional(),
+    /** Specific tool being invoked (e.g. "exec", "write_file"). */
+    tool: z.string().optional(),
+    /** Tool group / category (e.g. "runtime", "fs", "web"). */
+    tool_group: z.string().optional(),
+    /** Skill requesting the tool invocation (e.g. "shell_agent"). */
+    skill: z.string().optional(),
+    /** How the intent was derived (e.g. "heuristic"). Assistive signal only. */
+    intent_source: z.string().optional(),
+    /** Agent identifier (e.g. "openclaw-browser-agent"). Enables per-agent policies. */
+    agent_id: z.string().optional(),
+    /** Agent role from control plane (e.g. "web_automation"). */
+    agent_role: z.string().optional(),
+    /** Additional agent metadata for policy matching. */
+    agent_metadata: z.record(z.unknown()).optional(),
+    context: z
+      .object({
+        external_network: z.boolean().optional(),
+        writes_files: z.boolean().optional(),
+        elevated_privileges: z.boolean().optional(),
+        package_manager: z.string().optional(),
+        targets: z
+          .union([
+            z.array(z.string()),
+            z.object({
+              paths: z.array(z.string()).optional(),
+              hosts: z.array(z.string()).optional(),
+            }),
+          ])
+          .optional(),
+        exec: z
+          .object({
+            argv0: z.string().optional(),
+            argv: z.array(z.string()).optional(),
+            cwd: z.string().optional(),
+          })
+          .optional(),
+        side_effects: z
+          .object({
+            writes_possible: z.boolean().optional(),
+            network_possible: z.boolean().optional(),
+          })
+          .optional(),
+        channel: z.string().optional(),
+        recipient: z.string().optional(),
+        channel_display: z.string().optional(),
+        url: z.string().optional(),
+        query: z.string().optional(),
+      })
+      .optional(),
+    templateVars: z.record(z.string()).optional(),
+    provenance: z
+      .object({
+        source: z.enum(['marketplace', 'internal', 'git', 'unknown']).optional(),
+        publisher: z.string().optional(),
+        artifact_hash: z.string().optional(),
+      })
+      .optional(),
+    override: z
+      .object({
+        actor: z.string(),
+        role: z.string(),
+        action: z.string().optional(),
+        request: OverrideSchema,
+      })
+      .optional(),
+  });
+
+  const enforceAdapterEnvelope = (context: AdapterAuthContext, payload: unknown) => {
+    if (!payload || typeof payload !== "object") {
+      throw new Error("Invalid adapter payload");
+    }
+    const record = payload as Record<string, unknown>;
+    if (
+      record.adapter_id !== context.adapterId ||
+      record.tenant_id !== context.tenantId ||
+      record.workspace_id !== context.workspaceId
+    ) {
+      throw new Error("Adapter scope mismatch");
+    }
+  };
+
+  const extractTargetPaths = (
+    context: { targets?: string[] | { paths?: string[] } } | undefined
+  ): string[] => {
+    if (!context?.targets) return [];
+    if (Array.isArray(context.targets)) return context.targets;
+    return context.targets.paths || [];
+  };
+
+  const resolveTelemetryPayload = (
+    context: AdapterAuthContext,
+    payload: unknown,
+    _expectedType: string
+  ): { payload: unknown; signed: boolean } => {
+    enforceAdapterEnvelope(context, payload);
+    return { payload, signed: false };
+  };
+
+  app.post("/llm-task", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = LLMTaskSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    try {
+      const result = await runLLMTask(parsed.data);
+      return reply.send({
+        status: "ok",
+        output: result.output,
+        usage: result.usage,
+        cost: result.cost,
+        validated: result.validated
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "LLM task failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Pre-execution decision endpoint for adapters.
+   */
+  app.post("/api/execution/request", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const parsed = ExecutionDecisionRequestSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      if (
+        parsed.data.adapter_id !== adapterContext.adapterId ||
+        parsed.data.tenant_id !== adapterContext.tenantId ||
+        parsed.data.workspace_id !== adapterContext.workspaceId
+      ) {
+        try {
+          recordBlockedExecutionTrace(
+            {
+              tenant_id: parsed.data.tenant_id,
+              workspace_id: parsed.data.workspace_id,
+              adapter_id: parsed.data.adapter_id,
+              tool: parsed.data.tool,
+              tool_group: parsed.data.tool_group,
+              execution_id: parsed.data.execution_id,
+              requested_capabilities: parsed.data.requested_capabilities,
+            },
+            "Adapter scope mismatch"
+          );
+        } catch (_) {
+          // non-fatal: trace recording must not break the response
+        }
+        return reply.status(403).send({ error: "Adapter scope mismatch" });
+      }
+
+      const unauthorized = parsed.data.requested_capabilities.filter(
+        (cap) => !adapterContext.allowedCapabilities.includes(cap)
+      );
+      if (unauthorized.length > 0) {
+        try {
+          recordBlockedExecutionTrace(
+            {
+              tenant_id: parsed.data.tenant_id,
+              workspace_id: parsed.data.workspace_id,
+              adapter_id: parsed.data.adapter_id,
+              tool: parsed.data.tool,
+              tool_group: parsed.data.tool_group,
+              execution_id: parsed.data.execution_id,
+              requested_capabilities: parsed.data.requested_capabilities,
+            },
+            `Capability not allowed: ${unauthorized.join(", ")}`
+          );
+        } catch (_) {
+          // non-fatal: trace recording must not break the response
+        }
+        return reply.status(403).send({
+          error: "Capability not allowed",
+          capabilities: unauthorized,
+        });
+      }
+
+      // Adapter retry/resume path: if a prior decision exists for this execution_id, honor it.
+      if (parsed.data.execution_id) {
+        const latest = getLatestDecisionForExecution({
+          tenantId: parsed.data.tenant_id,
+          workspaceId: parsed.data.workspace_id,
+          adapterId: parsed.data.adapter_id,
+          executionId: parsed.data.execution_id,
+        });
+
+        if (latest?.status === "approved") {
+          return reply.send({
+            allowed: true,
+            execution_id: latest.execution_id,
+            granted_scope: latest.granted_scope || undefined,
+            decision: "allow",
+            decision_id: latest.decision_id,
+            explanation: "Approved locally (self-attested)",
+          });
+        }
+
+        if (latest?.status === "denied") {
+          return reply.send({
+            allowed: false,
+            execution_id: latest.execution_id,
+            decision: "deny",
+            decision_id: latest.decision_id,
+            blocked_reason: "approval_denied",
+            explanation: "Denied locally (self-attested)",
+          });
+        }
+      }
+
+      const decision = evaluateExecutionDecision(parsed.data);
+      if (decision.requires_approval) {
+        const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        const created = createDecision({
+          tenantId: parsed.data.tenant_id,
+          workspaceId: parsed.data.workspace_id,
+          executionId: decision.execution_id,
+          adapterId: parsed.data.adapter_id,
+          requiredRole: "release_manager",
+          expiresAt,
+          requestSnapshot: {
+            request: parsed.data,
+            decision,
+          },
+          grantedScope: (decision.granted_scope || {}) as Record<string, unknown>,
+          callbackUrl: parsed.data.callback_url,
+        });
+
+        auditLog("policy_decision_pending", {
+          tenantId: parsed.data.tenant_id,
+          workspaceId: parsed.data.workspace_id,
+          userId: `adapter:${parsed.data.adapter_id}`,
+          traceId: undefined,
+          eventData: {
+            decision_id: created.decision_id,
+            adapter_id: parsed.data.adapter_id,
+            execution_id: decision.execution_id,
+            required_role: created.required_role,
+            expires_at: created.expires_at,
+            tool: parsed.data.tool || null,
+            tool_group: parsed.data.tool_group || null,
+            targets: extractTargetPaths(parsed.data.context),
+            intent: parsed.data.intent || null,
+          },
+        });
+
+        return reply.send({
+          ...decision,
+          decision: "pending",
+          decision_id: created.decision_id,
+          expires_at: created.expires_at || undefined,
+          required_role: created.required_role || undefined,
+        });
+      }
+      if (decision.allowed === false) {
+        try {
+          recordBlockedExecutionTrace(
+            {
+              tenant_id: parsed.data.tenant_id,
+              workspace_id: parsed.data.workspace_id,
+              adapter_id: parsed.data.adapter_id,
+              tool: parsed.data.tool,
+              tool_group: parsed.data.tool_group,
+              execution_id: decision.execution_id,
+              requested_capabilities: parsed.data.requested_capabilities,
+            },
+            decision.blocked_reason ?? "Policy denied"
+          );
+        } catch (_) {
+          // non-fatal: trace recording must not break the response
+        }
+      }
+
+      // Record decision for allow/deny (Phase 2: Governance Event Model)
+      try {
+        recordDecision({
+          tenantId: parsed.data.tenant_id,
+          workspaceId: parsed.data.workspace_id,
+          executionId: decision.execution_id,
+          adapterId: parsed.data.adapter_id,
+          status: decision.allowed ? "allow" : "deny",
+          requestSnapshot: { request: parsed.data, decision },
+          grantedScope: decision.allowed ? (decision.granted_scope || {}) as Record<string, unknown> : undefined,
+        });
+      } catch (_) {
+        // non-fatal: decision recording must not break the response
+      }
+
+      // Populate Tool Registry for Ops Console (allow and deny)
+      const toolName =
+        parsed.data.tool ||
+        parsed.data.tool_names?.[0] ||
+        parsed.data.requested_capabilities?.[0];
+      if (toolName) {
+        try {
+          recordToolAuthorization({
+            tenant_id: parsed.data.tenant_id,
+            adapter_id: parsed.data.adapter_id,
+            execution_id: decision.execution_id,
+            tool: toolName,
+            tool_group: parsed.data.tool_group ?? null,
+            decision: decision.allowed ? "allow" : "deny",
+            policy_id: decision.matched_policies?.[0] ?? null,
+            reason: decision.allowed ? null : (decision.blocked_reason ?? "policy_denied"),
+            granted_scope: decision.allowed ? decision.granted_scope : undefined,
+          });
+        } catch (_) {
+          // non-fatal: Tool Registry population must not break the response
+        }
+      }
+
+      return reply.send(decision);
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Execution decision failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Execution decision status endpoint (read path for approval polling).
+   *
+   * Adapters poll this to check whether a pending decision has been approved/denied.
+   * Returns the current decision effect and approval type.
+   */
+  app.get("/api/execution/:executionId", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const { executionId } = request.params as { executionId: string };
+
+      if (!executionId) {
+        return reply.status(400).send({ error: "execution_id is required" });
+      }
+
+      const decision = getLatestDecisionForExecution({
+        tenantId: adapterContext.tenantId,
+        workspaceId: adapterContext.workspaceId,
+        adapterId: adapterContext.adapterId,
+        executionId,
+      });
+
+      if (!decision) {
+        return reply.status(404).send({ error: "No decision found for this execution_id" });
+      }
+
+      // Map decision status → effect
+      let effect: string;
+      switch (decision.status) {
+        case 'approved':
+          effect = 'allow';
+          break;
+        case 'denied':
+          effect = 'deny';
+          break;
+        case 'expired':
+          effect = 'deny';
+          break;
+        case 'pending':
+        default:
+          effect = 'pending';
+          break;
+      }
+
+      return reply.send({
+        execution_id: executionId,
+        effect,
+        decision_id: decision.decision_id,
+        approval_type: 'local',
+      });
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Decision status check failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Tool authorization endpoint for adapters.
+   */
+  const ToolAuthorizeSchema = z.object({
+    execution_id: z.string(),
+    adapter_id: z.string(),
+    tool: z.string(),
+    tool_group: z.string().optional(),
+    requested_scope: z.record(z.unknown()).optional(),
+    environment: z.string().optional(),
+    skill_state: z.string().optional(),
+    adapter_risk_class: z.string().optional(),
+  });
+
+  app.post("/api/governance/tool/authorize", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const parsed = ToolAuthorizeSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      if (parsed.data.adapter_id !== adapterContext.adapterId) {
+        return reply.status(403).send({ error: "Adapter scope mismatch" });
+      }
+
+      auditLog("tool_authorization_requested", {
+        tenantId: adapterContext.tenantId,
+        workspaceId: adapterContext.workspaceId,
+        eventData: {
+          adapter_id: adapterContext.adapterId,
+          execution_id: parsed.data.execution_id,
+          tool: parsed.data.tool,
+        },
+      });
+
+      const policy = evaluatePolicy({
+        tenant_id: adapterContext.tenantId,
+        workspace_id: adapterContext.workspaceId,
+        environment: parsed.data.environment,
+        tool: parsed.data.tool,
+        tool_group: parsed.data.tool_group,
+        adapter_id: adapterContext.adapterId,
+        adapter_risk_class: parsed.data.adapter_risk_class,
+        skill_state: parsed.data.skill_state,
+      });
+
+      const policyId = policy.matched_policies?.[0];
+      if (policy.decision !== "allow") {
+        recordToolAuthorization({
+          tenant_id: adapterContext.tenantId,
+          adapter_id: adapterContext.adapterId,
+          execution_id: parsed.data.execution_id,
+          tool: parsed.data.tool,
+          tool_group: parsed.data.tool_group ?? null,
+          decision: "deny",
+          policy_id: policyId ?? null,
+          reason: policy.decision === "require_approval" ? "requires_approval" : "policy_denied",
+        });
+
+        auditLog("tool_authorization_denied", {
+          tenantId: adapterContext.tenantId,
+          workspaceId: adapterContext.workspaceId,
+          eventData: {
+            adapter_id: adapterContext.adapterId,
+            execution_id: parsed.data.execution_id,
+            tool: parsed.data.tool,
+            policy_id: policyId,
+            decision: policy.decision,
+          },
+        });
+
+        return reply.send({
+          decision: "deny",
+          reason: policy.decision === "require_approval" ? "approval_required" : "policy_denied",
+          policy_id: policyId,
+        });
+      }
+
+      recordToolAuthorization({
+        tenant_id: adapterContext.tenantId,
+        adapter_id: adapterContext.adapterId,
+        execution_id: parsed.data.execution_id,
+        tool: parsed.data.tool,
+        tool_group: parsed.data.tool_group ?? null,
+        decision: "allow",
+        policy_id: policyId ?? null,
+        reason: null,
+        granted_scope: (parsed.data.requested_scope || {}) as Record<string, unknown>,
+      });
+
+      auditLog("tool_authorization_granted", {
+        tenantId: adapterContext.tenantId,
+        workspaceId: adapterContext.workspaceId,
+        eventData: {
+          adapter_id: adapterContext.adapterId,
+          execution_id: parsed.data.execution_id,
+          tool: parsed.data.tool,
+          policy_id: policyId
+        },
+      });
+
+      return reply.send({
+        decision: "allow",
+        tool_token: null,
+        expires_at: null,
+        granted_scope: parsed.data.requested_scope || {},
+        policy: {
+          decision: policy.decision,
+          matched_policies: policy.matched_policies,
+          decision_trace: policy.decision_trace,
+          explanation: policy.explanation,
+        },
+      });
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Tool authorization failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Policy evaluation endpoints.
+   */
+  const PolicyEvalSchema = z.object({
+    tenant_id: z.string().optional(),
+    workspace_id: z.string().optional(),
+    environment: z.string().optional(),
+    tool: z.string().optional(),
+    action: z.string().optional(),
+    resource: z.string().optional(),
+    actor: z.string().optional(),
+    adapter_id: z.string().optional(),
+    adapter_risk_class: z.string().optional(),
+    skill_state: z.string().optional(),
+    risk_level: z.string().optional(),
+    estimated_cost: z.number().optional(),
+    context: z.record(z.unknown()).optional(),
+    requested_capabilities: z.array(z.string()).optional(),
+    intent: z.string().optional(),
+    agent_id: z.string().optional(),
+    agent_role: z.string().optional(),
+  });
+
+  app.post("/api/policy/evaluate", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const parsed = PolicyEvalSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+      const result = evaluatePolicy({
+        ...parsed.data,
+        tenant_id: adapterContext.tenantId,
+        workspace_id: adapterContext.workspaceId,
+        adapter_id: adapterContext.adapterId,
+      });
+      return reply.send(result);
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Policy evaluation failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.post("/api/policy/dry-run", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "audit:view");
+      const parsed = PolicyEvalSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+      const result = evaluatePolicy({
+        ...parsed.data,
+        tenant_id: parsed.data.tenant_id || context.tenantId,
+      });
+      return reply.send(result);
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Policy dry-run failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Ops Console policy dry-run endpoint.
+   * Alias for the local OSS distribution so the Ops UI can call the expected path.
+   */
+  app.post("/ops/api/policies/dry-run", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "audit:view");
+      const parsed = PolicyEvalSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+      const result = evaluatePolicy({
+        ...parsed.data,
+        tenant_id: parsed.data.tenant_id || context.tenantId,
+      });
+      return reply.send(result);
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Policy dry-run failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Policy management endpoints (Ops).
+   */
+  app.get("/ops/api/policies", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "policy:view");
+
+      const PolicyQuerySchema = z.object({
+        tenant_id: z.string().optional(),
+        workspace_id: z.string().optional(),
+        environment: z.string().optional(),
+        enabled: z.string().optional(),
+      });
+
+      const parsed = PolicyQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const enabled =
+        parsed.data.enabled === undefined
+          ? undefined
+          : parsed.data.enabled === "true";
+
+      const policies = listPolicies({
+        tenantId,
+        workspaceId: parsed.data.workspace_id,
+        environment: parsed.data.environment,
+        enabled,
+      });
+
+      return reply.send({ policies });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load policies" });
+    }
+  });
+
+  const reconcilePendingDecisionsForAllowPolicies = async (params: {
+    tenantId: string;
+    workspaceId?: string;
+    userId?: string;
+    opsContext: Awaited<ReturnType<typeof requireOpsContextFromHeaders>>;
+    requestLog: { warn: (obj: Record<string, unknown>) => void };
+    reason: "policy_exception_created" | "policy_exception_refresh_scan";
+  }) => {
+    const pending = listPendingDecisions({
+      tenantId: params.tenantId,
+      workspaceId: params.workspaceId,
+    });
+    const resolvedDecisionIds: string[] = [];
+    for (const pendingDecision of pending) {
+      if (!canAccessWorkspace(params.opsContext, pendingDecision.workspace_id)) continue;
+      const policyContext = buildPolicyContextFromDecisionRecord(pendingDecision);
+      if (!policyContext) continue;
+      const policyResult = evaluatePolicy(policyContext);
+      if (policyResult.decision !== "allow") continue;
+
+      const resolution = {
+        approval_type: "local",
+        trust_level: "self_attested",
+        approved_by: params.userId || "local_operator",
+        cloud_authority: false,
+        policy_decision: policyResult.decision,
+        matched_policy_ids: policyResult.matched_policies,
+        policy_explanation: policyResult.explanation || null,
+        policy_decision_trace: policyResult.decision_trace,
+        note:
+          params.reason === "policy_exception_created"
+            ? "Auto-approved after exception rule creation"
+            : "Auto-approved after exception refresh scan",
+        justification: params.reason,
+        resolved_at: new Date().toISOString(),
+      };
+      const updated = resolveDecision({
+        decisionId: pendingDecision.decision_id,
+        status: "approved",
+        resolution,
+      });
+      if (!updated) continue;
+      resolvedDecisionIds.push(updated.decision_id);
+
+      const req = (updated.request_snapshot as Record<string, unknown> | null)?.request as Record<string, unknown> | undefined;
+      const toolFromDecision = typeof req?.tool === "string" ? req.tool : Array.isArray(req?.requested_capabilities) ? req.requested_capabilities[0] : undefined;
+      if (typeof toolFromDecision === "string") {
+        try {
+          recordToolAuthorization({
+            tenant_id: updated.tenant_id,
+            adapter_id: updated.adapter_id,
+            execution_id: updated.execution_id,
+            tool: toolFromDecision,
+            tool_group: typeof req?.tool_group === "string" ? req.tool_group : null,
+            decision: "allow",
+            policy_id: Array.isArray(resolution.matched_policy_ids) ? resolution.matched_policy_ids[0] : null,
+            reason: null,
+            granted_scope: updated.granted_scope ?? undefined,
+          });
+        } catch (_) {
+          // non-fatal
+        }
+      }
+
+      auditLog("policy_decision_resolved", {
+        tenantId: updated.tenant_id,
+        workspaceId: updated.workspace_id,
+        userId: params.userId,
+        eventData: {
+          decision_id: updated.decision_id,
+          execution_id: updated.execution_id,
+          adapter_id: updated.adapter_id,
+          status: updated.status,
+          approved_by: params.userId || "local_operator",
+          tool:
+            ((updated.request_snapshot as Record<string, unknown> | null)?.request as Record<string, unknown> | undefined)
+              ?.tool || null,
+          targets: extractTargetPaths(
+            ((updated.request_snapshot as Record<string, unknown> | null)?.request as Record<string, unknown> | undefined)
+              ?.context as Record<string, unknown> | undefined
+          ),
+          approval_type: "local",
+          trust_level: "self_attested",
+          cloud_authority: false,
+          resolution_source: params.reason,
+        },
+      });
+
+      if (updated.callback_url) {
+        try {
+          await fetch(updated.callback_url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              decision_id: updated.decision_id,
+              status: updated.status,
+              execution_id: updated.execution_id,
+            }),
+          });
+        } catch (e) {
+          params.requestLog.warn({
+            msg: "decision callback_url notify failed after policy reconcile",
+            decision_id: updated.decision_id,
+            error: String(e),
+          });
+        }
+      }
+    }
+
+    return {
+      checkedCount: pending.length,
+      resolvedDecisionIds,
+      resolvedCount: resolvedDecisionIds.length,
+    };
+  };
+
+  app.post("/ops/api/policies", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "policy:manage");
+
+      const body = request.body as Record<string, unknown>;
+      const sourceTraceId =
+        typeof body._source_trace_id === "string" && TRACE_ID_RE.test(body._source_trace_id)
+          ? body._source_trace_id
+          : undefined;
+      const sourceAdapterId =
+        typeof body._source_adapter_id === "string" && body._source_adapter_id.length > 0
+          ? body._source_adapter_id
+          : undefined;
+      const rawWizardMeta = body._wizard_meta;
+      const {
+        _source_trace_id: _stripSourceTraceId,
+        _source_adapter_id: _stripSourceAdapterId,
+        _wizard_meta: _stripWizardMeta,
+        ...policyPayload
+      } = body;
+      const parsed = PolicySchema.safeParse(policyPayload);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.scope?.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const existingPolicy = getPolicy(tenantId, parsed.data.policy_id);
+      const previousWizardMeta =
+        existingPolicy?._wizard_meta &&
+        typeof existingPolicy._wizard_meta === "object" &&
+        !Array.isArray(existingPolicy._wizard_meta)
+          ? (existingPolicy._wizard_meta as unknown as WizardAuditMeta)
+          : null;
+      const fallbackOutcome = normalizeOutcomeFromDecision(parsed.data.effect?.decision);
+      const wizardMeta = normalizeWizardMeta({
+        input: rawWizardMeta,
+        fallbackOutcome,
+        tenantId,
+        workspaceId: parsed.data.scope?.workspace_id,
+        actorUserId: context.userId,
+        previousMeta: previousWizardMeta,
+        isEdit: Boolean(existingPolicy),
+      });
+      if (isUnsafeAllowWizardMeta(wizardMeta)) {
+        return reply.status(400).send({
+          error: "Allow rules created via wizard require explicit acknowledgment",
+          code: "wizard_allow_ack_required",
+        });
+      }
+
+      const policyToPersist = {
+        ...parsed.data,
+        _wizard_meta: (() => {
+          const base = (wizardMeta as unknown as Record<string, unknown>) ?? existingPolicy?._wizard_meta ?? undefined;
+          const raw = rawWizardMeta && typeof rawWizardMeta === "object" && !Array.isArray(rawWizardMeta)
+            ? (rawWizardMeta as Record<string, unknown>)
+            : null;
+          const existingMeta = existingPolicy?._wizard_meta && typeof existingPolicy._wizard_meta === "object" && !Array.isArray(existingPolicy._wizard_meta)
+            ? (existingPolicy._wizard_meta as Record<string, unknown>)
+            : null;
+          const exceptionFor =
+            (typeof raw?.exception_for_policy_id === "string" && raw.exception_for_policy_id) ||
+            (typeof existingMeta?.exception_for_policy_id === "string" && existingMeta.exception_for_policy_id);
+          if (typeof exceptionFor === "string" && exceptionFor.length > 0 && base && typeof base === "object") {
+            return { ...base, exception_for_policy_id: exceptionFor };
+          }
+          return base;
+        })(),
+      };
+      const policySummaryBefore = existingPolicy
+        ? buildPolicySummaryForAudit(existingPolicy as unknown as Record<string, unknown>)
+        : null;
+      const policySummaryBeforeHash = policySummaryBefore ? hashPolicySummary(policySummaryBefore) : null;
+      const record = upsertPolicy({ tenantId, policy: policyToPersist });
+      const policySummary = buildPolicySummaryForAudit(record as unknown as Record<string, unknown>);
+      const policySummaryAfterHash = hashPolicySummary(policySummary);
+      const wizardMetaHash = wizardMeta
+        ? hashWizardMetaAttestation({ wizardMeta, policySummary })
+        : null;
+      const isUpdate = Boolean(existingPolicy);
+      let sourceDecisionResolution: {
+        decision_id?: string;
+        source_trace_id?: string;
+        resolved: boolean;
+        status_before?: string;
+        status_after?: string;
+        reason?: string;
+      } | null = null;
+
+      if (!isUpdate && sourceTraceId) {
+        logPolicyCreatedFromTrace({
+          tenantId,
+          workspaceId: record.workspace_id ?? undefined,
+          policyId: record.policy_id,
+          sourceTraceId,
+          tool: typeof record.conditions?.tool === 'string' ? record.conditions.tool : undefined,
+          decision: record.effect?.decision ?? "",
+          precedence: record.precedence,
+          adapterId: sourceAdapterId,
+          wizardMeta: wizardMeta ?? undefined,
+          policySummary,
+          wizardMetaHash: wizardMetaHash ?? undefined,
+        });
+      }
+      if (!isUpdate && wizardMeta) {
+        logPolicyCreatedViaWizard({
+          tenantId,
+          workspaceId: record.workspace_id ?? undefined,
+          sourceTraceId,
+          policyId: record.policy_id,
+          tool: typeof record.conditions?.tool === 'string' ? record.conditions.tool : undefined,
+          decision: record.effect?.decision ?? "",
+          precedence: record.precedence,
+          adapterId: sourceAdapterId,
+          wizardMeta,
+          policySummary,
+          wizardMetaHash: wizardMetaHash ?? undefined,
+        });
+      } else if (isUpdate && wizardMeta) {
+        const diffHint: string[] = [];
+        if (policySummaryBefore?.effect !== policySummary.effect) diffHint.push("effect");
+        if (policySummaryBefore?.precedence !== policySummary.precedence) diffHint.push("precedence");
+        if (
+          JSON.stringify(policySummaryBefore?.scope ?? {}) !== JSON.stringify(policySummary.scope ?? {})
+        ) {
+          diffHint.push("scope");
+        }
+        if (
+          JSON.stringify(policySummaryBefore?.key_conditions ?? {}) !==
+          JSON.stringify(policySummary.key_conditions ?? {})
+        ) {
+          diffHint.push("conditions");
+        }
+        logPolicyUpdatedViaWizard({
+          tenantId,
+          workspaceId: record.workspace_id ?? undefined,
+          sourceTraceId,
+          policyId: record.policy_id,
+          tool: typeof record.conditions?.tool === "string" ? record.conditions.tool : undefined,
+          decision: record.effect?.decision ?? "",
+          precedence: record.precedence,
+          adapterId: sourceAdapterId,
+          actorUserId: context.userId,
+          wizardMeta,
+          wizardMetaHash: wizardMetaHash ?? undefined,
+          policySummaryBefore: policySummaryBefore ?? undefined,
+          policySummaryAfter: policySummary,
+          policySummaryBeforeHash: policySummaryBeforeHash ?? undefined,
+          policySummaryAfterHash: policySummaryAfterHash,
+          diffHint,
+        });
+      }
+      let resolvedDecisionIds: string[] = [];
+      let resolvedDecisionCount = 0;
+      if (record.effect?.decision === "allow") {
+        const sourceBefore = sourceTraceId ? getDecision(sourceTraceId) : null;
+        const reconcileResult = await reconcilePendingDecisionsForAllowPolicies({
+          tenantId,
+          workspaceId: record.workspace_id ?? undefined,
+          userId: context.userId,
+          opsContext: context,
+          requestLog: request.log,
+          reason: "policy_exception_created",
+        });
+        resolvedDecisionIds = reconcileResult.resolvedDecisionIds;
+        resolvedDecisionCount = reconcileResult.resolvedCount;
+        if (sourceTraceId) {
+          const sourceAfter = getDecision(sourceTraceId);
+          if (sourceBefore && sourceBefore.tenant_id === tenantId) {
+            sourceDecisionResolution = {
+              decision_id: sourceBefore.decision_id,
+              source_trace_id: sourceTraceId,
+              resolved: Boolean(
+                sourceBefore.status === "pending" && sourceAfter?.status === "approved"
+              ),
+              status_before: sourceBefore.status,
+              status_after: sourceAfter?.status ?? sourceBefore.status,
+              reason:
+                sourceBefore.status === "pending" && sourceAfter?.status === "approved"
+                  ? "policy_exception_created"
+                  : undefined,
+            };
+          }
+        }
+      }
+      return reply.send({
+        policy: record,
+        source_decision: sourceDecisionResolution,
+        resolved_decision_ids: resolvedDecisionIds,
+        resolved_decision_count: resolvedDecisionCount,
+      });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to upsert policy" });
+    }
+  });
+
+  app.patch("/ops/api/policies/:policyId", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "policy:manage");
+
+      const UpdateSchema = z.object({
+        tenant_id: z.string().optional(),
+        enabled: z.boolean(),
+      });
+
+      const parsed = UpdateSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const record = setPolicyEnabled({
+        tenantId,
+        policyId: (request.params as { policyId: string }).policyId,
+        enabled: parsed.data.enabled,
+      });
+
+      if (!record) {
+        return reply.status(404).send({ error: "Policy not found" });
+      }
+
+      return reply.send({ policy: record });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to update policy" });
+    }
+  });
+
+  app.delete("/ops/api/policies/:policyId", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "policy:manage");
+
+      const DeleteSchema = z.object({
+        tenant_id: z.string().optional(),
+      });
+
+      const parsed = DeleteSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const ok = deletePolicy({ tenantId, policyId: (request.params as { policyId: string }).policyId });
+      if (!ok) {
+        return reply.status(404).send({ error: "Policy not found" });
+      }
+
+      return reply.send({ status: "deleted" });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to delete policy" });
+    }
+  });
+
+  /**
+   * Decision polling + resolution.
+   */
+  app.get("/api/decisions/:decisionId", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const decision = getDecision((request.params as { decisionId: string }).decisionId);
+      if (!decision) {
+        return reply.status(404).send({ error: "Decision not found" });
+      }
+
+      if (
+        decision.tenant_id !== adapterContext.tenantId ||
+        decision.workspace_id !== adapterContext.workspaceId ||
+        decision.adapter_id !== adapterContext.adapterId
+      ) {
+        return reply.status(403).send({ error: "Decision scope mismatch" });
+      }
+
+      return reply.send({
+        decision_id: decision.decision_id,
+        status: decision.status,
+        required_role: decision.required_role,
+        expires_at: decision.expires_at,
+        decision_token: null,
+        granted_scope: decision.granted_scope,
+        resolution: decision.resolution,
+        decision_token_used_at: null,
+      });
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Decision lookup failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.post("/api/decisions/:decisionId/consume", async (_request, reply) => {
+    return reply.status(501).send({
+      error: "Decision token consumption is Cloud-only. Use Clasper Cloud for approval tokens.",
+    });
+  });
+
+  app.get("/ops/api/decisions", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "decision:resolve");
+
+      const QuerySchema = z.object({
+        tenant_id: z.string().optional(),
+        workspace_id: z.string().optional(),
+        status: z.enum(["pending", "approved", "denied", "expired"]).optional(),
+        limit: z.coerce.number().int().min(1).max(500).optional(),
+      });
+
+      const parsed = QuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+      }
+
+      const tenantId = parsed.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+
+      const status = parsed.data.status || "pending";
+      const records = listDecisions({
+        tenantId,
+        workspaceId: parsed.data.workspace_id,
+        status,
+        limit: parsed.data.limit,
+      });
+
+      return reply.send({ decisions: records });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      return reply.status(500).send({ error: "Failed to load decisions" });
+    }
+  });
+
+  app.post("/ops/api/decisions/reconcile", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "decision:resolve");
+
+      const BodySchema = z.object({
+        tenant_id: z.string().optional(),
+        workspace_id: z.string().optional(),
+      });
+      const parsedBody = BodySchema.safeParse(request.body);
+      if (!parsedBody.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsedBody.error.flatten() });
+      }
+
+      const tenantId = parsedBody.data.tenant_id || context.tenantId;
+      if (!canAccessTenant(context, tenantId)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+      if (parsedBody.data.workspace_id && !canAccessWorkspace(context, parsedBody.data.workspace_id)) {
+        return reply.status(403).send({ error: "Workspace access denied" });
+      }
+
+      const reconcileResult = await reconcilePendingDecisionsForAllowPolicies({
+        tenantId,
+        workspaceId: parsedBody.data.workspace_id,
+        userId: context.userId,
+        opsContext: context,
+        requestLog: request.log,
+        reason: "policy_exception_refresh_scan",
+      });
+
+      return reply.send({
+        checked_count: reconcileResult.checkedCount,
+        resolved_count: reconcileResult.resolvedCount,
+        resolved_decision_ids: reconcileResult.resolvedDecisionIds,
+      });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Failed to reconcile pending decisions";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Resolve a decision locally (OSS/self-attested).
+   * Cloud-only trusted authority remains out of scope.
+   */
+  app.post("/ops/api/decisions/:decisionId/resolve", async (request, reply) => {
+    try {
+      const context = await requireOpsContextFromHeaders(request.headers);
+      requirePermission(context, "decision:resolve");
+
+      const BodySchema = z.object({
+        status: z.enum(["approved", "denied"]),
+        note: z.string().max(2000).optional(),
+        justification: z.string().max(2000).optional(),
+      });
+
+      const parsedBody = BodySchema.safeParse(request.body);
+      if (!parsedBody.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsedBody.error.flatten() });
+      }
+
+      const decisionId = (request.params as { decisionId: string }).decisionId;
+      const record = getDecision(decisionId);
+      if (!record) return reply.status(404).send({ error: "Decision not found" });
+
+      if (!canAccessTenant(context, record.tenant_id)) {
+        return reply.status(403).send({ error: "Tenant access denied" });
+      }
+      if (!canAccessWorkspace(context, record.workspace_id)) {
+        return reply.status(403).send({ error: "Workspace access denied" });
+      }
+
+      if (record.status !== "pending") {
+        return reply.status(409).send({ error: "Decision already resolved", status: record.status });
+      }
+
+      const resolution = {
+        approval_type: "local",
+        trust_level: "self_attested",
+        approved_by: context.userId || "local_operator",
+        cloud_authority: false,
+        note: parsedBody.data.note || null,
+        justification: parsedBody.data.justification || null,
+        resolved_at: new Date().toISOString(),
+      };
+
+      const updated = resolveDecision({
+        decisionId,
+        status: parsedBody.data.status,
+        resolution,
+      });
+      if (!updated) return reply.status(500).send({ error: "Failed to resolve decision" });
+
+      const req = (record.request_snapshot as Record<string, unknown> | null)?.request as Record<string, unknown> | undefined;
+      const toolFromDecision = typeof req?.tool === "string" ? req.tool : Array.isArray(req?.requested_capabilities) ? req.requested_capabilities[0] : undefined;
+      if (typeof toolFromDecision === "string") {
+        try {
+          recordToolAuthorization({
+            tenant_id: updated.tenant_id,
+            adapter_id: updated.adapter_id,
+            execution_id: updated.execution_id,
+            tool: toolFromDecision,
+            tool_group: typeof req?.tool_group === "string" ? req.tool_group : null,
+            decision: parsedBody.data.status === "approved" ? "allow" : "deny",
+            policy_id: null,
+            reason: parsedBody.data.status === "denied" ? "approval_denied" : null,
+            granted_scope: parsedBody.data.status === "approved" ? (updated.granted_scope ?? undefined) : undefined,
+          });
+        } catch (_) {
+          // non-fatal
+        }
+      }
+
+      auditLog("policy_decision_resolved", {
+        tenantId: updated.tenant_id,
+        workspaceId: updated.workspace_id,
+        userId: context.userId,
+        eventData: {
+          decision_id: updated.decision_id,
+          execution_id: updated.execution_id,
+          adapter_id: updated.adapter_id,
+          status: updated.status,
+          approved_by: context.userId || "local_operator",
+          tool:
+            ((record.request_snapshot as Record<string, unknown> | null)?.request as Record<string, unknown> | undefined)
+              ?.tool || null,
+          targets:
+            ((((record.request_snapshot as Record<string, unknown> | null)?.request as Record<string, unknown> | undefined)
+              ?.context as Record<string, unknown> | undefined)?.targets as string[] | undefined) || [],
+          approval_type: "local",
+          trust_level: "self_attested",
+          cloud_authority: false,
+        },
+      });
+
+      // Optional best-effort notification
+      if (updated.callback_url) {
+        try {
+          await fetch(updated.callback_url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              decision_id: updated.decision_id,
+              status: updated.status,
+              execution_id: updated.execution_id,
+            }),
+          });
+        } catch (e) {
+          request.log.warn({ msg: "decision callback_url notify failed", decision_id: updated.decision_id, error: String(e) });
+        }
+      }
+
+      return reply.send({ decision: updated });
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        return reply.status(403).send({
+          error: error.message,
+          code: "permission_denied",
+          permission: error.permission,
+          required_roles: error.requiredRoles
+        });
+      }
+      if (error instanceof OpsAuthError) {
+        const status =
+          error.code === "missing_token" ? 401 :
+          error.code === "config_error" ? 500 :
+          403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Failed to resolve decision";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+
+  /**
+   * Adapter registration endpoint.
+   */
+  app.post("/adapters/register", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const parsed = AdapterRegistrationSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+      }
+
+      if (parsed.data.adapter_id !== adapterContext.adapterId) {
+        return reply.status(403).send({ error: "Adapter scope mismatch" });
+      }
+
+      const registry = getAdapterRegistry();
+      const record = registry.register(adapterContext.tenantId, parsed.data);
+      return reply.send(record);
+    } catch (error) {
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Adapter registration failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Telemetry ingest endpoints for adapters.
+   */
+  app.post("/api/ingest/trace", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const resolved = resolveTelemetryPayload(adapterContext, request.body, "trace");
+      const result = ingestTrace(resolved.payload);
+      return reply.send({ status: result.status });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return reply.status(400).send({ error: "Invalid payload", details: error.flatten() });
+      }
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Trace ingest failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.post("/api/ingest/audit", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const resolved = resolveTelemetryPayload(adapterContext, request.body, "audit");
+      const result = ingestAudit(resolved.payload);
+      return reply.send({ status: result.status });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return reply.status(400).send({ error: "Invalid payload", details: error.flatten() });
+      }
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Audit ingest failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.post("/api/ingest/cost", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const resolved = resolveTelemetryPayload(adapterContext, request.body, "cost");
+      const result = ingestCost(resolved.payload);
+      return reply.send({ status: result.status });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return reply.status(400).send({ error: "Invalid payload", details: error.flatten() });
+      }
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Cost ingest failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.post("/api/ingest/metrics", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const resolved = resolveTelemetryPayload(adapterContext, request.body, "metrics");
+      const result = ingestMetrics(resolved.payload);
+      return reply.send({ status: result.status });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return reply.status(400).send({ error: "Invalid payload", details: error.flatten() });
+      }
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Metrics ingest failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  app.post("/api/ingest/violations", async (request, reply) => {
+    try {
+      const adapterContext = await requireAdapterContextFromHeaders(request.headers);
+      const resolved = resolveTelemetryPayload(adapterContext, request.body, "violations");
+      const result = ingestViolation(resolved.payload);
+      return reply.send({ status: result.status });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return reply.status(400).send({ error: "Invalid payload", details: error.flatten() });
+      }
+      if (error instanceof AdapterAuthError) {
+        const status = error.code === "missing_token" ? 401 : error.code === "config_error" ? 500 : 403;
+        return reply.status(status).send({ error: error.message, code: error.code });
+      }
+      const message = error instanceof Error ? error.message : "Violation ingest failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Usage stats endpoint for cost tracking.
+   * Following OpenClaw's usage tracking pattern.
+   */
+  app.get("/usage", async () => {
+    const tracker = getUsageTracker();
+    return tracker.getStats();
+  });
+
+  /**
+   * Enhanced health check endpoint.
+   * Following OpenClaw's health check pattern with component status.
+   */
+  app.get("/health", async (request) => {
+    const workspace = getWorkspaceLoader();
+    const workspaceAccessible = workspace.isAccessible();
+
+    // Check backend connectivity (simple fetch to health endpoint)
+    let backendStatus: "ok" | "error" | "unchecked" = "unchecked";
+    let backendError: string | undefined;
+
+    // Only check backend if query param ?deep=true is passed
+    const query = request.query as Record<string, string>;
+    if (query.deep === "true") {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const response = await fetch(`${config.backendUrl}/health`, {
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+        backendStatus = response.ok ? "ok" : "error";
+      } catch (err) {
+        backendStatus = "error";
+        backendError = err instanceof Error ? err.message : "Unknown error";
+      }
+    }
+
+    // Check database status
+    let databaseStatus: "ok" | "error" = "ok";
+    let databaseError: string | undefined;
+    try {
+      getDatabaseStats();
+    } catch (err) {
+      databaseStatus = "error";
+      databaseError = err instanceof Error ? err.message : "Unknown error";
+    }
+
+    const overallStatus = workspaceAccessible && backendStatus !== "error" && databaseStatus === "ok" ? "ok" : "degraded";
+
+    // Get skills info
+    const skillsLoader = getSkillsLoader();
+    const skillsContext = skillsLoader.load();
+
+    return {
+      status: overallStatus,
+      workspace: {
+        path: workspace.getWorkspacePath(),
+        status: workspaceAccessible ? "ok" : "missing",
+        maxCharsPerFile: workspace.getMaxChars(),
+        bootComplete: workspace.isBootComplete()
+      },
+      skills: {
+        enabled: skillsContext.enabledCount,
+        total: skillsContext.totalCount
+      },
+      backend: {
+        url: config.backendUrl,
+        status: backendStatus,
+        ...(backendError && { error: backendError })
+      },
+      database: {
+        status: databaseStatus,
+        ...(databaseError && { error: databaseError })
+      },
+      config: {
+        port: config.port,
+        defaultTask: config.defaultTaskTitle || "(not set)",
+        model: config.openaiModelDefault,
+        fallbackModel: config.openaiModelFallback || "(not set)",
+        policyOperatorsEnabled: config.policyOperatorsEnabled,
+      }
+    };
+  });
+
+  /**
+   * Context stats endpoint for prompt size visibility.
+   * Following OpenClaw's /context pattern.
+   */
+  app.get("/context", async (request) => {
+    const query = request.query as Record<string, string>;
+    const role = query.role;
+    const workspace = getWorkspaceLoader();
+    return workspace.getContextStats(role);
+  });
+
+  /**
+   * Clasper version and contract information.
+   * GET /api/version
+   */
+  app.get("/api/version", async () => {
+    return {
+      version: "1.2.1",
+      contract_version: CLASPER_CONTRACT_VERSION,
+      name: "Clasper Ops",
+      features: [
+        "traces",
+        "trace_diff",
+        "trace_labels",
+        "trace_annotations",
+        "trace_linking",
+        "skills",
+        "skill_lifecycle",
+        "skill_promotion",
+        "governance",
+        "budgets",
+        "cost_forecasting",
+        "risk_scoring",
+        "evals",
+        "workspace_pins",
+        "workspace_environments",
+        "impact_analysis",
+        "retention_policies"
+      ]
+    };
+  });
+
+  /**
+   * Validate control plane version compatibility.
+   * GET /api/compatibility
+   */
+  app.get("/api/compatibility", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const result = await validateControlPlaneVersion();
+
+    if (!result.compatible) {
+      return reply.status(503).send({
+        compatible: false,
+        clasper_contract_version: result.clasperContractVersion,
+        control_plane_contract_version: result.controlPlaneContractVersion,
+        error: result.error,
+        missing_features: result.missingFeatures
+      });
+    }
+
+    return reply.send({
+      compatible: true,
+      clasper_contract_version: result.clasperContractVersion,
+      control_plane_contract_version: result.controlPlaneContractVersion,
+      warnings: result.warnings
+    });
+  });
+
+  /**
+   * Skills endpoint for listing available skills.
+   * Following OpenClaw's skills pattern.
+   */
+  app.get("/skills", async () => {
+    const loader = getSkillsLoader();
+    const context = loader.load();
+    return {
+      enabled: context.enabledCount,
+      total: context.totalCount,
+      skills: context.skills.map((s) => ({
+        name: s.name,
+        description: s.description,
+        enabled: s.enabled,
+        gateReason: s.gateReason,
+        location: s.location,
+        metadata: s.metadata
+      }))
+    };
+  });
+
+  /**
+   * Boot status endpoint.
+   * Checks if BOOT.md has been run.
+   */
+  app.get("/boot", async () => {
+    const workspace = getWorkspaceLoader();
+    const bootContent = workspace.loadBoot();
+    const isComplete = workspace.isBootComplete();
+
+    return {
+      hasBoot: bootContent !== null,
+      isComplete,
+      content: isComplete ? null : bootContent
+    };
+  });
+
+  /**
+   * Mark boot as complete.
+   */
+  app.post("/boot/complete", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const workspace = getWorkspaceLoader();
+    workspace.markBootComplete();
+
+    return { status: "ok" };
+  });
+
+  // ============================================================================
+  // Trace Endpoints - Agent observability
+  // ============================================================================
+
+  /**
+   * List traces with filtering and pagination.
+   * Requires tenant_id query parameter.
+   */
+  const TraceListQuerySchema = z.object({
+    tenant_id: z.string(),
+    workspace_id: z.string().optional(),
+    agent_role: z.string().optional(),
+    start_date: z.string().optional(),
+    end_date: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    offset: z.coerce.number().int().min(0).default(0)
+  });
+
+  app.get("/traces", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = TraceListQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid query parameters", details: parsed.error.flatten() });
+    }
+
+    const query = parsed.data;
+    const traceStore = getTraceStore();
+
+    const result = traceStore.list({
+      tenantId: query.tenant_id,
+      workspaceId: query.workspace_id,
+      agentRole: query.agent_role,
+      startDate: query.start_date,
+      endDate: query.end_date,
+      limit: query.limit,
+      offset: query.offset
+    });
+
+    return reply.send({
+      traces: result.traces,
+      total: result.total,
+      has_more: result.hasMore,
+      limit: query.limit,
+      offset: query.offset
+    });
+  });
+
+  /**
+   * Get a single trace by ID.
+   * Requires tenant_id query parameter for authorization.
+   */
+  app.get("/traces/:id", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { id } = request.params as { id: string };
+    const query = request.query as { tenant_id?: string };
+
+    if (!query.tenant_id) {
+      return reply.status(400).send({ error: "tenant_id query parameter is required" });
+    }
+
+    const traceStore = getTraceStore();
+    const trace = traceStore.getForTenant(id, query.tenant_id);
+
+    if (!trace) {
+      return reply.status(404).send({ error: "Trace not found" });
+    }
+
+    return reply.send({ trace });
+  });
+
+  /**
+   * Get trace statistics for a tenant.
+   */
+  app.get("/traces/stats", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const query = request.query as { tenant_id?: string; start_date?: string; end_date?: string };
+
+    if (!query.tenant_id) {
+      return reply.status(400).send({ error: "tenant_id query parameter is required" });
+    }
+
+    const traceStore = getTraceStore();
+    const stats = traceStore.getStats(query.tenant_id, query.start_date, query.end_date);
+
+    return reply.send({ stats });
+  });
+
+  /**
+   * Replay a trace with different configuration.
+   * Returns comparison between original and replayed execution.
+   */
+  const ReplaySchema = z.object({
+    model: z.string().optional(),
+    skill_version: z.string().optional()
+  });
+
+  app.post("/traces/:id/replay", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { id } = request.params as { id: string };
+    const parsed = ReplaySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const traceStore = getTraceStore();
+    const replayContext = traceStore.getReplayContext(id);
+
+    if (!replayContext) {
+      return reply.status(404).send({ error: "Trace not found" });
+    }
+
+    // TODO: Implement full replay with different model/skill version
+    // For now, return the replay context
+    return reply.send({
+      status: "pending",
+      message: "Replay functionality coming soon",
+      original_trace: replayContext.trace,
+      replay_config: parsed.data
+    });
+  });
+
+  /**
+   * Compare two traces and return structured differences.
+   * POST /traces/diff
+   */
+  const TraceDiffSchema = z.object({
+    base_trace_id: z.string(),
+    compare_trace_id: z.string(),
+    include_summary: z.boolean().default(true)
+  });
+
+  app.post("/traces/diff", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = TraceDiffSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const { base_trace_id, compare_trace_id, include_summary } = parsed.data;
+    const traceStore = getTraceStore();
+
+    const baseTrace = traceStore.get(base_trace_id);
+    if (!baseTrace) {
+      return reply.status(404).send({ error: "Base trace not found", trace_id: base_trace_id });
+    }
+
+    const compareTrace = traceStore.get(compare_trace_id);
+    if (!compareTrace) {
+      return reply.status(404).send({ error: "Compare trace not found", trace_id: compare_trace_id });
+    }
+
+    const diff = diffTraces(baseTrace, compareTrace);
+    const response: Record<string, unknown> = { diff };
+
+    if (include_summary) {
+      response.summary_text = formatDiffSummary(diff);
+    }
+
+    return reply.send(response);
+  });
+
+  /**
+   * Set labels for a trace.
+   * POST /traces/:id/label
+   */
+  const TraceLabelSchema = z.object({
+    labels: z.record(z.string())
+  });
+
+  app.post("/traces/:id/label", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { id } = request.params as { id: string };
+    const parsed = TraceLabelSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const traceStore = getTraceStore();
+    const success = traceStore.setLabels(id, parsed.data.labels);
+
+    if (!success) {
+      return reply.status(404).send({ error: "Trace not found" });
+    }
+
+    return reply.send({
+      status: "ok",
+      trace_id: id,
+      labels: parsed.data.labels
+    });
+  });
+
+  /**
+   * Add an annotation to a trace (append-only).
+   * POST /traces/:id/annotate
+   */
+  const TraceAnnotateSchema = z.object({
+    key: z.string().min(1),
+    value: z.string(),
+    created_by: z.string().optional()
+  });
+
+  app.post("/traces/:id/annotate", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { id } = request.params as { id: string };
+    const parsed = TraceAnnotateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    // Verify trace exists
+    const traceStore = getTraceStore();
+    const trace = traceStore.get(id);
+    if (!trace) {
+      return reply.status(404).send({ error: "Trace not found" });
+    }
+
+    const annotations = getTraceAnnotations();
+    const annotation = annotations.annotate(
+      id,
+      parsed.data.key,
+      parsed.data.value,
+      parsed.data.created_by
+    );
+
+    return reply.status(201).send({
+      status: "ok",
+      annotation: {
+        id: annotation.id,
+        trace_id: annotation.traceId,
+        key: annotation.key,
+        value: annotation.value,
+        created_at: annotation.createdAt,
+        created_by: annotation.createdBy
+      }
+    });
+  });
+
+  /**
+   * Get annotations for a trace.
+   * GET /traces/:id/annotations
+   */
+  app.get("/traces/:id/annotations", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { id } = request.params as { id: string };
+
+    const annotations = getTraceAnnotations();
+    const traceAnnotations = annotations.getForTrace(id);
+
+    return reply.send({
+      trace_id: id,
+      annotations: traceAnnotations.map(a => ({
+        id: a.id,
+        key: a.key,
+        value: a.value,
+        created_at: a.createdAt,
+        created_by: a.createdBy
+      }))
+    });
+  });
+
+  /**
+   * Find traces by external entity ID (task, document, or message).
+   * GET /traces/by-entity
+   */
+  const TraceByEntityQuerySchema = z.object({
+    task_id: z.string().optional(),
+    document_id: z.string().optional(),
+    message_id: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(500).default(100)
+  });
+
+  app.get("/traces/by-entity", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = TraceByEntityQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+    }
+
+    const { task_id, document_id, message_id, limit } = parsed.data;
+    const traceStore = getTraceStore();
+
+    if (!task_id && !document_id && !message_id) {
+      return reply.status(400).send({
+        error: "At least one of task_id, document_id, or message_id is required"
+      });
+    }
+
+    let traces;
+    let entityType;
+    let entityId;
+
+    if (task_id) {
+      traces = traceStore.findByTaskId(task_id, limit);
+      entityType = 'task';
+      entityId = task_id;
+    } else if (document_id) {
+      traces = traceStore.findByDocumentId(document_id, limit);
+      entityType = 'document';
+      entityId = document_id;
+    } else {
+      traces = traceStore.findByMessageId(message_id!, limit);
+      entityType = 'message';
+      entityId = message_id;
+    }
+
+    return reply.send({
+      entity_type: entityType,
+      entity_id: entityId,
+      traces,
+      count: traces.length
+    });
+  });
+
+  /**
+   * Find traces by label.
+   * GET /traces/by-label
+   */
+  const TraceByLabelQuerySchema = z.object({
+    tenant_id: z.string(),
+    label_key: z.string(),
+    label_value: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(500).default(100)
+  });
+
+  app.get("/traces/by-label", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = TraceByLabelQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+    }
+
+    const { tenant_id, label_key, label_value, limit } = parsed.data;
+    const traceStore = getTraceStore();
+    const traces = traceStore.findByLabel(tenant_id, label_key, label_value, limit);
+
+    return reply.send({
+      traces,
+      count: traces.length
+    });
+  });
+
+  /**
+   * Database stats endpoint for monitoring.
+   */
+  app.get("/db/stats", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    try {
+      const stats = getDatabaseStats();
+      return reply.send({ stats });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to get database stats";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  // ============================================================================
+  // Skill Registry Endpoints
+  // ============================================================================
+
+  /**
+   * Publish a skill to the registry.
+   */
+  app.post("/skills/publish", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    try {
+      const manifest = SkillManifestSchema.parse(request.body);
+      const registry = getSkillRegistry();
+      const published = registry.publish(manifest);
+
+      return reply.status(201).send({
+        status: "ok",
+        skill: {
+          name: published.name,
+          version: published.version,
+          checksum: published.checksum,
+          published_at: published.publishedAt
+        }
+      });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return reply.status(400).send({ error: "Invalid manifest", details: err.flatten() });
+      }
+      const message = err instanceof Error ? err.message : "Failed to publish skill";
+      return reply.status(400).send({ error: message });
+    }
+  });
+
+  /**
+   * Get a skill by name (optionally with version).
+   */
+  app.get("/skills/registry/:name", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { name } = request.params as { name: string };
+    const query = request.query as { version?: string };
+
+    const registry = getSkillRegistry();
+    const skill = registry.get(name, query.version);
+
+    if (!skill) {
+      return reply.status(404).send({ error: "Skill not found" });
+    }
+
+    return reply.send({ skill });
+  });
+
+  /**
+   * List all versions of a skill.
+   */
+  app.get("/skills/registry/:name/versions", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { name } = request.params as { name: string };
+    const registry = getSkillRegistry();
+    const versions = registry.listVersions(name);
+
+    return reply.send({ name, versions });
+  });
+
+  /**
+   * Search skills in the registry.
+   */
+  const SkillSearchQuerySchema = z.object({
+    q: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    offset: z.coerce.number().int().min(0).default(0)
+  });
+
+  app.get("/skills/registry", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = SkillSearchQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+    }
+
+    const { q, limit, offset } = parsed.data;
+    const registry = getSkillRegistry();
+    const result = registry.search(q || '', { limit, offset });
+
+    return reply.send({
+      skills: result.skills.map(s => ({
+        name: s.name,
+        version: s.version,
+        description: s.description,
+        checksum: s.checksum,
+        published_at: s.publishedAt
+      })),
+      total: result.total,
+      has_more: result.hasMore
+    });
+  });
+
+  /**
+   * Run tests for a skill.
+   */
+  const SkillTestOptionsSchema = z.object({
+    model: z.string().optional(),
+    temperature: z.number().min(0).max(2).optional(),
+    mock_tools: z.boolean().optional(),
+    timeout: z.number().int().positive().optional()
+  });
+
+  app.post("/skills/registry/:name/test", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { name } = request.params as { name: string };
+    const query = request.query as { version?: string };
+
+    const parsed = SkillTestOptionsSchema.safeParse(request.body || {});
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid options", details: parsed.error.flatten() });
+    }
+
+    const registry = getSkillRegistry();
+    const skill = registry.get(name, query.version);
+
+    if (!skill) {
+      return reply.status(404).send({ error: "Skill not found" });
+    }
+
+    if (!skill.manifest.tests || skill.manifest.tests.length === 0) {
+      return reply.status(400).send({ error: "Skill has no tests defined" });
+    }
+
+    try {
+      const tester = getSkillTester();
+      const result = await tester.runTests(skill, {
+        model: parsed.data.model,
+        temperature: parsed.data.temperature,
+        mockTools: parsed.data.mock_tools,
+        timeout: parsed.data.timeout
+      });
+
+      return reply.send({
+        status: result.passRate === 1 ? "passed" : "failed",
+        result: {
+          skill_name: result.skillName,
+          skill_version: result.skillVersion,
+          model: result.model,
+          pass_count: result.passCount,
+          fail_count: result.failCount,
+          pass_rate: result.passRate,
+          total_duration_ms: result.totalDurationMs,
+          total_cost: result.totalCost,
+          results: result.results
+        }
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Test execution failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Promote a skill to a new state.
+   * POST /skills/:name/:version/promote
+   */
+  const SkillPromoteSchema = z.object({
+    target_state: z.enum(['draft', 'tested', 'approved', 'active', 'deprecated'])
+  });
+
+  app.post("/skills/:name/:version/promote", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { name, version } = request.params as { name: string; version: string };
+    const parsed = SkillPromoteSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const registry = getSkillRegistry();
+    const skill = registry.getAnyState(name, version);
+
+    if (!skill) {
+      return reply.status(404).send({ error: "Skill not found" });
+    }
+
+    const result = registry.promote(name, version, parsed.data.target_state);
+
+    if (!result.success) {
+      return reply.status(400).send({
+        error: "Promotion failed",
+        message: result.error,
+        current_state: skill.state,
+        target_state: parsed.data.target_state
+      });
+    }
+
+    // Log the state change to audit log
+    const auditLog = getAuditLog();
+    auditLog.log('skill_state_changed', {
+      tenantId: 'system',
+      eventData: {
+        skill_name: name,
+        skill_version: version,
+        from_state: skill.state,
+        to_state: parsed.data.target_state
+      }
+    });
+
+    return reply.send({
+      status: "ok",
+      skill: {
+        name: result.skill?.name,
+        version: result.skill?.version,
+        state: result.skill?.state,
+        previous_state: skill.state
+      }
+    });
+  });
+
+  /**
+   * Get skill state.
+   * GET /skills/:name/:version/state
+   */
+  app.get("/skills/:name/:version/state", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { name, version } = request.params as { name: string; version: string };
+    const registry = getSkillRegistry();
+    const skill = registry.getAnyState(name, version);
+
+    if (!skill) {
+      return reply.status(404).send({ error: "Skill not found" });
+    }
+
+    return reply.send({
+      name: skill.name,
+      version: skill.version,
+      state: skill.state,
+      is_executable: skill.state === 'active'
+    });
+  });
+
+  /**
+   * List skills by state.
+   * GET /skills/by-state
+   */
+  const SkillsByStateSchema = z.object({
+    state: z.enum(['draft', 'tested', 'approved', 'active', 'deprecated']),
+    limit: z.coerce.number().int().min(1).max(500).default(100)
+  });
+
+  app.get("/skills/by-state", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = SkillsByStateSchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+    }
+
+    const { state, limit } = parsed.data;
+    const registry = getSkillRegistry();
+    const skills = registry.getByState(state, limit);
+
+    return reply.send({
+      state,
+      skills: skills.map(s => ({
+        name: s.name,
+        version: s.version,
+        description: s.description,
+        published_at: s.publishedAt
+      })),
+      count: skills.length
+    });
+  });
+
+  // ============================================================================
+  // Workspace Pins Endpoints
+  // ============================================================================
+
+  /**
+   * Pin a workspace version.
+   * POST /workspace/pin
+   */
+  const WorkspacePinSchema = z.object({
+    workspace_id: z.string(),
+    environment: z.string().default('default'),
+    version_hash: z.string(),
+    skill_pins: z.record(z.string()).optional(),
+    model_pin: z.string().optional(),
+    provider_pin: z.string().optional(),
+    pinned_by: z.string().optional()
+  });
+
+  app.post("/workspace/pin", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = WorkspacePinSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const pins = getWorkspacePins();
+    const pin = pins.pin({
+      workspaceId: parsed.data.workspace_id,
+      environment: parsed.data.environment,
+      versionHash: parsed.data.version_hash,
+      skillPins: parsed.data.skill_pins,
+      modelPin: parsed.data.model_pin,
+      providerPin: parsed.data.provider_pin,
+      pinnedBy: parsed.data.pinned_by
+    });
+
+    // Log the pin to audit log
+    const auditLog = getAuditLog();
+    auditLog.log('workspace_change', {
+      tenantId: 'system',
+      workspaceId: parsed.data.workspace_id,
+      eventData: {
+        action: 'pin',
+        environment: parsed.data.environment,
+        version_hash: parsed.data.version_hash
+      }
+    });
+
+    return reply.status(201).send({
+      status: "ok",
+      pin: {
+        id: pin.id,
+        workspace_id: pin.workspaceId,
+        environment: pin.environment,
+        version_hash: pin.versionHash,
+        skill_pins: pin.skillPins,
+        model_pin: pin.modelPin,
+        provider_pin: pin.providerPin,
+        pinned_at: pin.pinnedAt
+      }
+    });
+  });
+
+  /**
+   * Get workspace pin.
+   * GET /workspace/pin
+   */
+  const WorkspacePinQuerySchema = z.object({
+    workspace_id: z.string(),
+    environment: z.string().default('default')
+  });
+
+  app.get("/workspace/pin", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = WorkspacePinQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+    }
+
+    const pins = getWorkspacePins();
+    const pin = pins.get(parsed.data.workspace_id, parsed.data.environment);
+
+    if (!pin) {
+      return reply.status(404).send({ error: "Pin not found" });
+    }
+
+    return reply.send({
+      pin: {
+        id: pin.id,
+        workspace_id: pin.workspaceId,
+        environment: pin.environment,
+        version_hash: pin.versionHash,
+        skill_pins: pin.skillPins,
+        model_pin: pin.modelPin,
+        provider_pin: pin.providerPin,
+        pinned_at: pin.pinnedAt,
+        pinned_by: pin.pinnedBy
+      }
+    });
+  });
+
+  /**
+   * List all pins for a workspace.
+   * GET /workspace/:id/pins
+   */
+  app.get("/workspace/:id/pins", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { id } = request.params as { id: string };
+    const pins = getWorkspacePins();
+    const workspacePins = pins.listForWorkspace(id);
+
+    return reply.send({
+      workspace_id: id,
+      pins: workspacePins.map(p => ({
+        id: p.id,
+        environment: p.environment,
+        version_hash: p.versionHash,
+        skill_pins: p.skillPins,
+        model_pin: p.modelPin,
+        provider_pin: p.providerPin,
+        pinned_at: p.pinnedAt
+      }))
+    });
+  });
+
+  /**
+   * Remove a workspace pin.
+   * DELETE /workspace/pin
+   */
+  app.delete("/workspace/pin", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = WorkspacePinQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+    }
+
+    const pins = getWorkspacePins();
+    const success = pins.unpin(parsed.data.workspace_id, parsed.data.environment);
+
+    if (!success) {
+      return reply.status(404).send({ error: "Pin not found" });
+    }
+
+    return reply.send({ status: "ok" });
+  });
+
+  // ============================================================================
+  // Workspace Environments Endpoints
+  // ============================================================================
+
+  /**
+   * Create or update a workspace environment.
+   * POST /workspace/envs
+   */
+  const WorkspaceEnvSchema = z.object({
+    workspace_id: z.string(),
+    environment: z.string(),
+    description: z.string().optional(),
+    version_hash: z.string().optional(),
+    is_default: z.boolean().optional(),
+    locked: z.boolean().optional()
+  });
+
+  app.post("/workspace/envs", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = WorkspaceEnvSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const envs = getWorkspaceEnvironments();
+    const env = envs.upsertEnvironment(parsed.data.workspace_id, parsed.data.environment, {
+      description: parsed.data.description,
+      versionHash: parsed.data.version_hash,
+      isDefault: parsed.data.is_default,
+      locked: parsed.data.locked
+    });
+
+    return reply.status(201).send({
+      status: "ok",
+      environment: {
+        id: env.id,
+        workspace_id: env.workspaceId,
+        environment: env.environment,
+        description: env.description,
+        version_hash: env.versionHash,
+        is_default: env.isDefault,
+        locked: env.locked,
+        created_at: env.createdAt,
+        updated_at: env.updatedAt
+      }
+    });
+  });
+
+  /**
+   * List environments for a workspace.
+   * GET /workspace/envs
+   */
+  app.get("/workspace/envs", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const query = request.query as { workspace_id?: string };
+    if (!query.workspace_id) {
+      return reply.status(400).send({ error: "workspace_id query parameter is required" });
+    }
+
+    const envs = getWorkspaceEnvironments();
+    const environments = envs.listEnvironments(query.workspace_id);
+
+    return reply.send({
+      workspace_id: query.workspace_id,
+      environments: environments.map(e => ({
+        id: e.id,
+        environment: e.environment,
+        description: e.description,
+        version_hash: e.versionHash,
+        is_default: e.isDefault,
+        locked: e.locked,
+        created_at: e.createdAt,
+        updated_at: e.updatedAt
+      }))
+    });
+  });
+
+  /**
+   * Initialize standard environments (dev, staging, prod).
+   * POST /workspace/envs/init
+   */
+  const EnvInitSchema = z.object({
+    workspace_id: z.string(),
+    default_env: z.enum(['dev', 'staging', 'prod']).optional().default('dev')
+  });
+
+  app.post("/workspace/envs/init", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = EnvInitSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const envs = getWorkspaceEnvironments();
+    const created = envs.initializeStandardEnvironments(
+      parsed.data.workspace_id,
+      parsed.data.default_env
+    );
+
+    return reply.status(201).send({
+      status: "ok",
+      environments: created.map(e => ({
+        environment: e.environment,
+        is_default: e.isDefault,
+        locked: e.locked
+      }))
+    });
+  });
+
+  // ============================================================================
+  // Workspace Impact Analysis Endpoints
+  // ============================================================================
+
+  /**
+   * Analyze the impact of workspace changes.
+   * POST /workspace/impact
+   */
+  const ImpactAnalysisSchema = z.object({
+    workspace_path: z.string().optional(),
+    old_version_hash: z.string(),
+    new_version_hash: z.string().optional()
+  });
+
+  app.post("/workspace/impact", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = ImpactAnalysisSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    try {
+      const workspace = getWorkspaceLoader();
+      const workspacePath = parsed.data.workspace_path || workspace.getWorkspacePath();
+
+      let analysis;
+      if (parsed.data.new_version_hash) {
+        // Compare two versions
+        analysis = analyzeImpact(
+          workspacePath,
+          parsed.data.old_version_hash,
+          parsed.data.new_version_hash
+        );
+      } else {
+        // Compare version to current workspace
+        analysis = analyzeImpactFromCurrent(
+          workspacePath,
+          'default',
+          parsed.data.old_version_hash
+        );
+      }
+
+      return reply.send({
+        status: "ok",
+        analysis: {
+          summary: analysis.summary,
+          file_changes: analysis.fileChanges,
+          affected_skills: analysis.affectedSkills.map(s => ({
+            name: s.name,
+            version: s.version,
+            state: s.state,
+            change_type: s.changeType,
+            affected_files: s.affectedFiles
+          })),
+          permission_changes: analysis.permissionChanges.map(p => ({
+            skill_name: p.skillName,
+            tool_name: p.toolName,
+            change_type: p.changeType
+          })),
+          prompt_impact: {
+            current_size: analysis.promptImpact.currentSize,
+            new_size: analysis.promptImpact.newSize,
+            delta: analysis.promptImpact.delta,
+            percent_change: analysis.promptImpact.percentChange
+          },
+          risk: analysis.risk,
+          recommendations: analysis.recommendations
+        }
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Impact analysis failed";
+      return reply.status(400).send({ error: message });
+    }
+  });
+
+  // ============================================================================
+  // Audit Log Endpoints
+  // ============================================================================
+
+  /**
+   * Query the audit log.
+   */
+  const AuditQuerySchema = z.object({
+    tenant_id: z.string(),
+    workspace_id: z.string().optional(),
+    trace_id: z.string().optional(),
+    event_type: z.string().optional(),
+    start_date: z.string().optional(),
+    end_date: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(1000).default(100),
+    offset: z.coerce.number().int().min(0).default(0)
+  });
+
+  app.get("/audit", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = AuditQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+    }
+
+    const query = parsed.data;
+    const auditLog = getAuditLog();
+
+    const result = auditLog.query({
+      tenantId: query.tenant_id,
+      workspaceId: query.workspace_id,
+      traceId: query.trace_id,
+      eventType: query.event_type as any,
+      startDate: query.start_date,
+      endDate: query.end_date,
+      limit: query.limit,
+      offset: query.offset
+    });
+
+    return reply.send({
+      entries: result.entries,
+      total: result.total,
+      has_more: result.hasMore
+    });
+  });
+
+  /**
+   * Get audit log statistics.
+   */
+  app.get("/audit/stats", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const query = request.query as { tenant_id?: string; start_date?: string; end_date?: string };
+
+    if (!query.tenant_id) {
+      return reply.status(400).send({ error: "tenant_id query parameter is required" });
+    }
+
+    const auditLog = getAuditLog();
+    const stats = auditLog.getStats(query.tenant_id, query.start_date ?? undefined, query.end_date ?? undefined);
+
+    return reply.send({ stats });
+  });
+
+  // ============================================================================
+  // Budget Endpoints
+  // ============================================================================
+
+  /**
+   * Get budget for a tenant.
+   */
+  app.get("/budget", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const query = request.query as { tenant_id?: string };
+
+    if (!query.tenant_id) {
+      return reply.status(400).send({ error: "tenant_id query parameter is required" });
+    }
+
+    const budgetManager = getBudgetManager();
+    const budget = budgetManager.getBudget(query.tenant_id);
+
+    if (!budget) {
+      return reply.status(404).send({ error: "No budget set for this tenant" });
+    }
+
+    const stats = budgetManager.getStats(query.tenant_id);
+
+    return reply.send({ budget, stats });
+  });
+
+  /**
+   * Set or update budget for a tenant.
+   */
+  const SetBudgetSchema = z.object({
+    tenant_id: z.string(),
+    budget_usd: z.number().positive(),
+    period_start: z.string().optional(),
+    period_end: z.string().optional(),
+    hard_limit: z.boolean().optional(),
+    alert_threshold: z.number().min(0).max(1).optional()
+  });
+
+  app.post("/budget", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = SetBudgetSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const data = parsed.data;
+    const budgetManager = getBudgetManager();
+
+    const budget = budgetManager.setBudget(data.tenant_id, {
+      budgetUsd: data.budget_usd,
+      periodStart: data.period_start,
+      periodEnd: data.period_end,
+      hardLimit: data.hard_limit,
+      alertThreshold: data.alert_threshold
+    });
+
+    return reply.send({ status: "ok", budget });
+  });
+
+  /**
+   * Check if a request is within budget.
+   */
+  app.get("/budget/check", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const query = request.query as { tenant_id?: string; estimated_cost?: string };
+
+    if (!query.tenant_id) {
+      return reply.status(400).send({ error: "tenant_id query parameter is required" });
+    }
+
+    const estimatedCost = query.estimated_cost ? parseFloat(query.estimated_cost) : 0;
+    const budgetManager = getBudgetManager();
+    const result = budgetManager.checkBudget(query.tenant_id, estimatedCost);
+
+    return reply.send(result);
+  });
+
+  /**
+   * Forecast cost before execution.
+   * POST /cost/forecast
+   */
+  const CostForecastSchema = z.object({
+    tenant_id: z.string(),
+    prompt_size: z.number().int().positive(),
+    max_output_tokens: z.number().int().positive().optional().default(1000),
+    model: z.string(),
+    provider: z.string().optional()
+  });
+
+  app.post("/cost/forecast", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = CostForecastSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const budgetManager = getBudgetManager();
+    const forecast = budgetManager.forecastCost({
+      tenantId: parsed.data.tenant_id,
+      promptSize: parsed.data.prompt_size,
+      maxOutputTokens: parsed.data.max_output_tokens,
+      model: parsed.data.model,
+      provider: parsed.data.provider
+    });
+
+    // Return forecast with budget status
+    return reply.send({
+      forecast: {
+        estimated_cost: forecast.estimatedCost,
+        input_cost: forecast.inputCost,
+        output_cost: forecast.outputCost,
+        budget_allowed: forecast.budgetAllowed,
+        budget_remaining: forecast.budgetRemaining,
+        would_exceed_budget: forecast.wouldExceedBudget,
+        warning: forecast.warning
+      },
+      details: {
+        input_tokens: forecast.details.inputTokens,
+        output_tokens: forecast.details.outputTokens,
+        model: forecast.details.model,
+        input_price_per_token: forecast.details.inputPricePerToken,
+        output_price_per_token: forecast.details.outputPricePerToken
+      }
+    });
+  });
+
+  // ============================================================================
+  // Trace Retention Endpoints
+  // ============================================================================
+
+  /**
+   * Set retention policy for a tenant.
+   * POST /retention/policy
+   */
+  const RetentionPolicySchema = z.object({
+    tenant_id: z.string(),
+    retention_days: z.number().int().min(1).max(3650).optional(),
+    sampling_strategy: z.enum(['full', 'sampled', 'errors_only']).optional(),
+    storage_mode: z.enum(['full', 'summary', 'minimal']).optional()
+  });
+
+  app.post("/retention/policy", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = RetentionPolicySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const retention = getRetentionPolicies();
+    const policy = retention.setPolicy(parsed.data.tenant_id, {
+      retentionDays: parsed.data.retention_days,
+      samplingStrategy: parsed.data.sampling_strategy,
+      storageMode: parsed.data.storage_mode
+    });
+
+    return reply.send({
+      status: "ok",
+      policy: {
+        tenant_id: policy.tenantId,
+        retention_days: policy.retentionDays,
+        sampling_strategy: policy.samplingStrategy,
+        storage_mode: policy.storageMode,
+        created_at: policy.createdAt,
+        updated_at: policy.updatedAt
+      }
+    });
+  });
+
+  /**
+   * Get retention policy for a tenant.
+   * GET /retention/policy
+   */
+  app.get("/retention/policy", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const query = request.query as { tenant_id?: string };
+    if (!query.tenant_id) {
+      return reply.status(400).send({ error: "tenant_id query parameter is required" });
+    }
+
+    const retention = getRetentionPolicies();
+    const policy = retention.getPolicy(query.tenant_id);
+
+    if (!policy) {
+      return reply.status(404).send({ error: "No retention policy set for this tenant" });
+    }
+
+    return reply.send({
+      policy: {
+        tenant_id: policy.tenantId,
+        retention_days: policy.retentionDays,
+        sampling_strategy: policy.samplingStrategy,
+        storage_mode: policy.storageMode,
+        created_at: policy.createdAt,
+        updated_at: policy.updatedAt
+      }
+    });
+  });
+
+  /**
+   * Enforce retention policy for a tenant.
+   * POST /retention/enforce
+   */
+  app.post("/retention/enforce", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const body = request.body as { tenant_id?: string };
+
+    const retention = getRetentionPolicies();
+
+    if (body.tenant_id) {
+      // Enforce for specific tenant
+      const result = retention.enforcePolicy(body.tenant_id);
+      return reply.send({
+        status: "ok",
+        result: {
+          tenant_id: result.tenantId,
+          traces_deleted: result.tracesDeleted,
+          cutoff_date: result.cutoffDate,
+          duration_ms: result.duration
+        }
+      });
+    } else {
+      // Enforce for all tenants with policies
+      const results = retention.enforceAllPolicies();
+      return reply.send({
+        status: "ok",
+        results: results.map(r => ({
+          tenant_id: r.tenantId,
+          traces_deleted: r.tracesDeleted,
+          cutoff_date: r.cutoffDate,
+          duration_ms: r.duration
+        })),
+        total_deleted: results.reduce((sum, r) => sum + r.tracesDeleted, 0)
+      });
+    }
+  });
+
+  /**
+   * Get retention stats.
+   * GET /retention/stats
+   */
+  app.get("/retention/stats", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const retention = getRetentionPolicies();
+    const stats = retention.getStats();
+    const needingCleanup = retention.getTenantsNeedingCleanup();
+
+    return reply.send({
+      stats,
+      tenants_needing_cleanup: needingCleanup.map(t => ({
+        tenant_id: t.tenantId,
+        old_trace_count: t.oldTraceCount,
+        retention_days: t.retentionDays
+      }))
+    });
+  });
+
+  // ============================================================================
+  // Risk Scoring Endpoints
+  // ============================================================================
+
+  /**
+   * Calculate risk score for an execution.
+   * POST /risk/score
+   */
+  const RiskScoreSchema = z.object({
+    tool_count: z.number().int().min(0),
+    tool_names: z.array(z.string()).optional(),
+    skill_state: z.enum(['draft', 'tested', 'approved', 'active', 'deprecated']).optional(),
+    temperature: z.number().min(0).max(2).optional(),
+    data_sensitivity: z.enum(['none', 'low', 'medium', 'high', 'pii']).optional(),
+    model: z.string().optional(),
+    skill_tested: z.boolean().optional(),
+    skill_pinned: z.boolean().optional(),
+    custom_flags: z.array(z.string()).optional()
+  });
+
+  app.post("/risk/score", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = RiskScoreSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const input: RiskScoringInput = {
+      toolCount: parsed.data.tool_count,
+      toolNames: parsed.data.tool_names,
+      skillState: parsed.data.skill_state,
+      temperature: parsed.data.temperature,
+      dataSensitivity: parsed.data.data_sensitivity,
+      model: parsed.data.model,
+      skillTested: parsed.data.skill_tested,
+      skillPinned: parsed.data.skill_pinned,
+      customFlags: parsed.data.custom_flags
+    };
+
+    const score = calculateRiskScore(input);
+
+    return reply.send({
+      risk_score: score.score,
+      risk_level: score.level,
+      factors: {
+        tool_breadth: score.factors.toolBreadth,
+        skill_maturity: score.factors.skillMaturity,
+        model_volatility: score.factors.modelVolatility,
+        data_sensitivity: score.factors.dataSensitivity,
+        custom_factors: score.factors.customFactors
+      },
+      risk_factors: score.riskFactors,
+      recommendations: score.recommendations
+    });
+  });
+
+  // ============================================================================
+  // Evaluation Endpoints
+  // ============================================================================
+
+  /**
+   * Run an evaluation.
+   */
+  const EvalCaseSchema = z.object({
+    id: z.string().optional(),
+    name: z.string().optional(),
+    input: z.string(),
+    expected_output: z.string().optional(),
+    expected_tool_calls: z.array(z.string()).optional(),
+    acceptable_outputs: z.array(z.string()).optional(),
+    tags: z.array(z.string()).optional()
+  });
+
+  const RunEvalSchema = z.object({
+    dataset: z.object({
+      name: z.string(),
+      description: z.string().optional(),
+      cases: z.array(EvalCaseSchema).min(1)
+    }),
+    options: z.object({
+      model: z.string(),
+      skill_name: z.string().optional(),
+      skill_version: z.string().optional(),
+      temperature: z.number().min(0).max(2).optional(),
+      timeout: z.number().int().positive().optional(),
+      mock_tools: z.boolean().optional()
+    })
+  });
+
+  app.post("/evals/run", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = RunEvalSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const { dataset: rawDataset, options: rawOptions } = parsed.data;
+
+    // Convert to internal format
+    const dataset: EvalDataset = {
+      name: rawDataset.name,
+      description: rawDataset.description,
+      cases: rawDataset.cases.map(c => ({
+        id: c.id,
+        name: c.name,
+        input: c.input,
+        expectedOutput: c.expected_output,
+        expectedToolCalls: c.expected_tool_calls,
+        acceptableOutputs: c.acceptable_outputs,
+        tags: c.tags
+      }))
+    };
+
+    const options: EvalOptions = {
+      model: rawOptions.model,
+      skillName: rawOptions.skill_name,
+      skillVersion: rawOptions.skill_version,
+      temperature: rawOptions.temperature,
+      timeout: rawOptions.timeout,
+      mockTools: rawOptions.mock_tools
+    };
+
+    try {
+      const evalRunner = getEvalRunner();
+      const result = await evalRunner.run(dataset, options);
+
+      return reply.send({
+        status: result.scores.passRate === 1 ? "passed" : "failed",
+        result: {
+          id: result.id,
+          dataset_name: result.datasetName,
+          model: result.model,
+          skill_name: result.skillName,
+          skill_version: result.skillVersion,
+          scores: result.scores,
+          case_count: result.cases.length,
+          pass_count: result.cases.filter(c => c.passed).length,
+          duration_ms: result.durationMs
+        }
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Evaluation failed";
+      return reply.status(500).send({ error: message });
+    }
+  });
+
+  /**
+   * Get evaluation result by ID.
+   */
+  app.get("/evals/:id", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const { id } = request.params as { id: string };
+    const evalRunner = getEvalRunner();
+    const result = evalRunner.getResult(id);
+
+    if (!result) {
+      return reply.status(404).send({ error: "Evaluation result not found" });
+    }
+
+    return reply.send({ result });
+  });
+
+  /**
+   * List evaluation results.
+   */
+  const EvalListQuerySchema = z.object({
+    dataset_name: z.string().optional(),
+    skill_name: z.string().optional(),
+    model: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    offset: z.coerce.number().int().min(0).default(0)
+  });
+
+  app.get("/evals", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = EvalListQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid query", details: parsed.error.flatten() });
+    }
+
+    const query = parsed.data;
+    const evalRunner = getEvalRunner();
+    const result = evalRunner.listResults({
+      datasetName: query.dataset_name,
+      skillName: query.skill_name,
+      model: query.model,
+      limit: query.limit,
+      offset: query.offset
+    });
+
+    return reply.send({
+      results: result.results.map(r => ({
+        id: r.id,
+        dataset_name: r.datasetName,
+        model: r.model,
+        skill_name: r.skillName,
+        scores: r.scores,
+        started_at: r.startedAt
+      })),
+      total: result.total
+    });
+  });
+
+  /**
+   * Streaming endpoint for real-time responses.
+   * Returns Server-Sent Events (SSE).
+   */
+  const StreamSchema = z.object({
+    user_id: z.string(),
+    session_key: z.string(),
+    message: z.string(),
+    messages: z.array(MessageSchema).optional(),
+    metadata: z.record(z.any()).optional()
+  });
+
+  app.post("/api/agents/stream", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = StreamSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const payload = parsed.data;
+    const { role } = parseSessionKey(payload.session_key);
+
+    await streamAgentReply(reply, {
+      role,
+      userMessage: payload.message,
+      messages: payload.messages,
+      metadata: payload.metadata
+    });
+  });
+
+  app.post("/api/agents/send", async (request, reply) => {
+    const daemonKey = config.daemonKey;
+    const headerKey = request.headers["x-agent-daemon-key"];
+    if (daemonKey && headerKey !== daemonKey) {
+      return reply.status(403).send({ error: "Invalid daemon key" });
+    }
+
+    const parsed = SendSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "Invalid payload", details: parsed.error.flatten() });
+    }
+
+    const payload = parsed.data;
+    const { userId, role } = parseSessionKey(payload.session_key);
+    if (userId !== payload.user_id) {
+      return reply.status(400).send({ error: "user_id does not match session_key" });
+    }
+
+    requireEnv("AGENT_JWT_SECRET", config.agentJwtSecret);
+    const agentToken = await buildAgentToken(payload.user_id, role);
+
+    // Resolve task_id with flexible options:
+    // 1. Use provided task_id directly (backend-owned)
+    // 2. Find/create by task_title from request
+    // 3. Find/create by CLASPER_DEFAULT_TASK env var
+    // 4. Error if none of the above
+    let taskId: string | null = payload.task_id || null;
+
+    if (!taskId) {
+      // Determine task title: request > env > none
+      const taskTitle = payload.task_title || config.defaultTaskTitle;
+
+      if (!taskTitle) {
+        return reply.status(400).send({
+          error: "Task not specified. Provide task_id, task_title, or set CLASPER_DEFAULT_TASK env var."
+        });
+      }
+
+      // Look for existing task with this title
+      const tasks = await listTasks(agentToken);
+      const existing = tasks.find((task) => task.title === taskTitle);
+
+      if (existing) {
+        taskId = existing.id;
+      } else {
+        // Auto-create the task (any role can create now)
+        const created = await createTask(agentToken, {
+          title: taskTitle,
+          description: payload.task_description || `Agent thread: ${taskTitle}`,
+          status: "in_progress",
+          metadata: payload.task_metadata || { type: "agent_thread" }
+        });
+        taskId = created.id;
+      }
+    }
+
+    if (!taskId) {
+      return reply.status(500).send({ error: "Failed to resolve task_id" });
+    }
+
+    // Handle streaming mode
+    if (payload.stream) {
+      await streamAgentReply(reply, {
+        role,
+        userMessage: payload.message,
+        messages: payload.messages,
+        metadata: payload.metadata
+      });
+      return;
+    }
+
+    // Execute through built-in runtime adapter
+    const runtimeResult = await runBuiltinRuntime({
+      tenant_id: payload.user_id,
+      workspace_id: payload.metadata?.workspace_id || "default",
+      user_message: payload.message,
+      messages: payload.messages,
+      metadata: payload.metadata,
+      role
+    });
+
+    await postMessage(agentToken, {
+      task_id: taskId,
+      content: runtimeResult.response,
+      actor_type: "agent",
+      agent_role: role
+    });
+
+    if (payload.metadata?.kickoff_plan) {
+      await postDocument(agentToken, {
+        task_id: taskId,
+        title: payload.metadata.plan_title || "Plan",
+        content: runtimeResult.response,
+        doc_type: "plan"
+      });
+    }
+
+    // Build response with token usage, cost, and context info
+    const response: Record<string, unknown> = {
+      status: "ok",
+      task_id: taskId,
+      trace_id: runtimeResult.trace_id,
+      execution_id: runtimeResult.execution_id,
+      response: runtimeResult.response,
+      usage: runtimeResult.usage,
+      cost: runtimeResult.cost
+    };
+
+    // Add context warning if approaching limit
+    if (runtimeResult.context_warning) {
+      response.context_warning = runtimeResult.context_warning;
+    }
+
+    // Fire webhook if configured (async, doesn't block response)
+    if (payload.webhook) {
+      fireWebhook(
+        payload.webhook as WebhookConfig,
+        buildCompletionPayload({
+          taskId,
+          userId: payload.user_id,
+          role,
+          response: runtimeResult.response,
+          usage: runtimeResult.usage,
+          cost: runtimeResult.cost,
+          metadata: payload.metadata
+        }),
+        app.log
+      );
+    }
+
+    return reply.send(response);
+  });
+
+  return app;
+}
+
+if (process.env.CLASPER_TEST_MODE !== "true") {
+  const app = buildApp();
+  app.listen({ port: config.port, host: "0.0.0.0" }).catch((err) => {
+    app.log.error(err);
+    process.exit(1);
+  });
+}

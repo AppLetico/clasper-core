@@ -1,0 +1,95 @@
+# Clasper Default Policies (dev/test)
+#
+# Dev/test fixtures for approval flow tests, wizard flows, reconcile endpoint.
+# NOT included in production seed. Use explicit flag:
+#
+#   make seed-openclaw-policies SEED_TEST_POLICIES=1
+#   npm run seed:test-policies
+
+- policy_id: policy-auto-resolve-idempotent
+  description: "Allow rule for exec. Created from approval flow; idempotent resolve behavior."
+  scope:
+    tenant_id: local
+    workspace_id: local
+  subject:
+    type: tool
+    name: exec
+  conditions:
+    tool: exec
+  effect:
+    decision: allow
+  precedence: 40
+  enabled: true
+
+- policy_id: policy-wizard-update-test
+  description: "Allow exec (ls, pwd) within workspace. Test fixture for wizard update flow."
+  scope:
+    tenant_id: local
+    workspace_id: local
+  subject:
+    type: tool
+    name: exec
+  conditions:
+    tool: exec
+    context.exec.argv0:
+      in: ["ls", "pwd"]
+    context.targets.paths:
+      all_under: ["{{workspace.root}}"]
+  effect:
+    decision: allow
+  precedence: 40
+  enabled: true
+
+- policy_id: policy-reconcile-endpoint-test
+  description: "Allow exec (ls) under workspace root. Test fixture for reconcile endpoint."
+  scope:
+    tenant_id: local
+    workspace_id: local
+  subject:
+    type: tool
+    name: exec
+  conditions:
+    tool: exec
+    tool_group: runtime
+    context.exec.argv0:
+      in: ["ls"]
+    context.targets.paths:
+      all_under: ["{{workspace.root}}"]
+  effect:
+    decision: allow
+  precedence: 30
+  enabled: true
+
+- policy_id: policy-auto-resolve-source-decision
+  description: "Allow exec (ls) within workspace. Auto-resolves source pending decision."
+  scope:
+    tenant_id: local
+    workspace_id: local
+  subject:
+    type: tool
+    name: exec
+  conditions:
+    tool: exec
+    context.exec.argv0:
+      in: ["ls"]
+    context.targets.paths:
+      all_under: ["{{workspace.root}}"]
+  effect:
+    decision: allow
+  precedence: 30
+  enabled: true
+
+- policy_id: policy-wizard-update-ack-required-test
+  description: "Require approval for exec. Test fixture for ack-required validation."
+  scope:
+    tenant_id: local
+    workspace_id: local
+  subject:
+    type: tool
+    name: exec
+  conditions:
+    tool: exec
+  effect:
+    decision: require_approval
+  precedence: 20
+  enabled: true

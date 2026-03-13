@@ -1,0 +1,61 @@
+# Prscope Feature Definitions — clasper-core
+# Define features to match against upstream PRs
+
+features:
+  security:
+    keywords:
+      - security
+      - auth
+      - authentication
+      - authorization
+      - jwt
+      - tls
+      - injection
+      - vulnerability
+      - cve
+    paths:
+      - "**/security/**"
+      - "**/auth/**"
+      - "**/*auth*.py"
+      - "**/*auth*.ts"
+
+  streaming:
+    keywords:
+      - stream
+      - streaming
+      - sse
+      - websocket
+      - real-time
+      - realtime
+      - chunk
+      - flush
+    paths:
+      - "**/streaming*"
+      - "**/stream*"
+      - "**/*sse*"
+
+  tools:
+    keywords:
+      - tool
+      - function
+      - function_call
+      - tool_call
+      - proxy
+    paths:
+      - "**/tools/**"
+      - "**/*tool*"
+      - "**/*proxy*"
+
+  api:
+    keywords:
+      - api
+      - endpoint
+      - route
+      - handler
+      - rest
+      - graphql
+    paths:
+      - "**/api/**"
+      - "**/routes/**"
+      - "**/handlers/**"
+      - "**/routers/**"
